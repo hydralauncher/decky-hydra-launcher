@@ -1,0 +1,10 @@
+{
+  "name": "Hydra",
+  "author": "Hydra Launcher",
+  "flags": ["debug", "_root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["hydra launcher", "steam"],
+    "description": "Hydra is a plugin for the Steam Deck that allows you to backup and upload your games to the cloud."
+  }
+}

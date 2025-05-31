@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+message FriendRequest {
+  int32 friend_request_count = 1;
+  optional string sender_id = 2;
+}
+
+message FriendGameSession {
+  string object_id = 1;
+  string shop = 2;
+  string friend_id = 3;
+}
+
+message Envelope {
+  oneof payload {
+    FriendRequest friend_request = 1;
+    FriendGameSession friend_game_session = 2;
+  }
+}
