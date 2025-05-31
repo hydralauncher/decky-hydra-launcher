@@ -78,7 +78,7 @@ export function Home() {
         </span>
       </div>
     );
-  }, [gameStats, objectId, setRoute]);
+  }, [gameStats, objectId, setRoute, hours, minutes, seconds]);
 
   return (
     <>

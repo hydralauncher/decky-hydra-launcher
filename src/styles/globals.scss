@@ -174,6 +174,20 @@
 .game-cloud-saves {
   &__header {
     display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  &__automatic-backups {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 14px;
+  }
+
+  &__details {
+    display: flex;
     align-items: center;
     gap: 8px;
   }
@@ -188,7 +202,6 @@
     width: 100%;
     display: flex;
     align-items: center;
-    justify-content: center;
     border-radius: 4px;
     background-color: rgba(255, 255, 255, 0.08);
     color: rgba(255, 255, 255, 0.8);
@@ -197,16 +210,25 @@
     gap: 8px;
   }
 
+  &__warning {
+    color: rgb(225 179 29 / 80%);
+    font-size: 12px;
+    font-weight: 400;
+    display: block;
+  }
+
   &__cloud-save {
     width: 100%;
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: flex-start;
     border-radius: 4px;
     background-color: rgba(255, 255, 255, 0.08);
     border: none;
-    gap: 8px;
+    gap: 4px;
     color: rgba(255, 255, 255, 0.8);
     padding: 8px;
+    overflow: hidden;
 
     &__title {
       white-space: nowrap;
@@ -214,5 +236,16 @@
       text-overflow: ellipsis;
       min-width: 0;
     }
+
+    &__date {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.5);
+    }
+  }
+
+  &__info {
+    font-size: 14px;
+    margin-top: 16px;
+    display: block;
   }
 }

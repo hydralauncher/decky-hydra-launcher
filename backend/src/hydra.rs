@@ -158,6 +158,7 @@ pub async fn upload_save_game(
     shop: &str,
     wine_prefix_path: Option<&str>,
     access_token: &str,
+    label: &str,
 ) -> Result<()> {
     let bundle_location = bundle_backup(shop, object_id, wine_prefix_path).await?;
 
@@ -184,7 +185,7 @@ pub async fn upload_save_game(
             "homeDir": home_dir,
             "downloadOptionTitle": serde_json::Value::Null,
             "platform": std::env::consts::OS,
-            "label": "Decky Plugin",
+            "label": label,
         }))
         .send()
         .await?
@@ -235,8 +236,6 @@ fn restore_ludusavi_backup(
             let source_path = game_backup_path.join(&source_path_with_drives);
 
             let public_path = "C:/users/Public";
-            println!("user_profile_path: {}", normalize_path(&user_profile_path));
-            println!("ludusavi {}", transform_ludusavi_backup_path_into_windows_path(key, artifact_wine_prefix_path));
 
             let destination_path = transform_ludusavi_backup_path_into_windows_path(key, artifact_wine_prefix_path)
                 .replacen(

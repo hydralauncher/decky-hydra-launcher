@@ -3,9 +3,14 @@ import { api } from "./hydra-api";
 import { toaster } from "@decky/api";
 import { Button, PanelSection } from "@decky/ui";
 import { composeToastLogo } from "./helpers";
-import { useAuthStore, useUserStore, type Game } from "./stores";
+import {
+  useAuthStore,
+  useCurrentGame,
+  useUserStore,
+  type Game,
+} from "./stores";
 import { backupAndUpload, downloadGameArtifact } from "./events";
-import { CloudIcon } from "./components";
+import { CheckIcon, CloudIcon } from "./components";
 import { useDate } from "./hooks";
 
 interface GameArtifact {
@@ -27,8 +32,11 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
   const [artifacts, setArtifacts] = useState<GameArtifact[]>([]);
   const { auth } = useAuthStore();
   const { user, hasActiveSubscription } = useUserStore();
+  const { objectId } = useCurrentGame();
 
-  const { formatDate } = useDate();
+  const { formatDate, formatDateTime } = useDate();
+
+  const isGameRunning = objectId === game.objectId;
 
   const getArtifacts = useCallback(async () => {
     const artifacts = await api
@@ -72,19 +80,27 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
 
   const createNewBackup = useCallback(async () => {
     if (game.automaticCloudSync && auth && hasActiveSubscription) {
-      await backupAndUpload(
-        game.objectId,
-        game.winePrefixPath,
-        auth.accessToken
-      );
+      try {
+        await backupAndUpload(
+          game.objectId,
+          game.winePrefixPath,
+          auth.accessToken,
+          `Decky Backup from ${formatDate(new Date())}`
+        );
 
-      toaster.toast({
-        title: "Backup and upload successful",
-        body: "The game has been backed up and uploaded to the cloud",
-        logo: composeToastLogo(game.iconUrl),
-      });
+        toaster.toast({
+          title: "Backup and upload successful",
+          body: "The game has been backed up and uploaded to the cloud",
+          logo: composeToastLogo(game.iconUrl),
+        });
 
-      getArtifacts();
+        getArtifacts();
+      } catch (error) {
+        toaster.toast({
+          title: "Failed to create backup",
+          body: "Please check if all game files are correct",
+        });
+      }
     }
   }, [
     auth,
@@ -92,32 +108,44 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     game.objectId,
     game.winePrefixPath,
     hasActiveSubscription,
+    formatDate,
   ]);
 
   return (
     <PanelSection title="Cloud Saves">
       <div className="game-cloud-saves__header">
-        <img
-          src={game.iconUrl}
-          width="30"
-          style={{ borderRadius: 8, objectFit: "cover" }}
-          alt={game.title}
-        />
+        <div className="game-cloud-saves__details">
+          <img
+            src={game.iconUrl}
+            width="30"
+            style={{ borderRadius: 8, objectFit: "cover" }}
+            alt={game.title}
+          />
 
-        <span>{game.title}</span>
+          <span style={{ fontWeight: 700 }}>{game.title}</span>
+        </div>
+
+        {isGameRunning && (
+          <span className="game-cloud-saves__warning">
+            This game is currently in session. To restore a backup, please close
+            the game beforehand.
+          </span>
+        )}
+
+        {game.automaticCloudSync && (
+          <div className="game-cloud-saves__automatic-backups">
+            <CheckIcon />
+
+            <span>Automatic backups enabled</span>
+          </div>
+        )}
       </div>
-
-      {game.automaticCloudSync && <span>Automatic backups enabled</span>}
-
-      <span>
-        This game is currently in session. To restore a backup, please close the
-        game beforehand.
-      </span>
 
       <div className="game-cloud-saves__cloud-saves">
         <Button
           className="game-cloud-saves__new-backup"
           onClick={createNewBackup}
+          disabled={isGameRunning}
         >
           <CloudIcon />
           New Backup
@@ -128,18 +156,21 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
             key={artifact.id}
             className="game-cloud-saves__cloud-save"
             onClick={() => downloadArtifact(artifact)}
+            disabled={isGameRunning}
           >
-            <span>
+            <span className="game-cloud-saves__cloud-save__title">
               {artifact.label ??
                 `Backup from ${formatDate(artifact.createdAt)}`}
             </span>
 
-            <span>{}</span>
+            <span className="game-cloud-saves__cloud-save__date">
+              {formatDateTime(artifact.createdAt)}
+            </span>
           </Button>
         ))}
       </div>
 
-      <span>
+      <span className="game-cloud-saves__info">
         {artifacts.length}/{user?.quirks.backupsPerGameLimit ?? 4} save slots
         used
       </span>

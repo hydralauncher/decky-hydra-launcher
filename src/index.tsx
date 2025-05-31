@@ -20,6 +20,7 @@ import { AuthGuide } from "./auth-guide";
 import { backupAndUpload, getLibrary, isHydraLauncherRunning } from "./events";
 import { getAuth } from "./events";
 import { HydraLogo } from "./components";
+import { formatDate } from "./hooks";
 
 function Plugin() {
   const { route, setRoute } = useNavigationStore();
@@ -102,10 +103,14 @@ const onAppLifetimeNotification = async (
       setRemoteId(game.remoteId);
       setStartedAt(startedAt);
 
+      console.log("Started at", startedAt);
+
       updateInterval = setInterval(async () => {
         const secondsSinceLastTick = Math.floor(
           (new Date().getTime() - lastTick.getTime()) / 1_000
         );
+
+        console.log("Seconds since last tick", secondsSinceLastTick);
 
         setElapsedTimeInMillis(Date.now() - startedAt.getTime());
 
@@ -148,7 +153,8 @@ const onAppLifetimeNotification = async (
       await backupAndUpload(
         game.objectId,
         game.winePrefixPath,
-        auth.accessToken
+        auth.accessToken,
+        `Automatic Decky Backup from ${formatDate(new Date(), "en")}`
       );
 
       toaster.toast({
