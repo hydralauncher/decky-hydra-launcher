@@ -9,3 +9,7 @@ export const backupAndUpload = callable<[string, string | null, string], void>(
 export const isHydraLauncherRunning = callable<[], boolean>(
   "is_hydra_launcher_running"
 );
+export const downloadGameArtifact = callable<
+  [string, string, string, string, string | null, string],
+  void
+>("download_game_artifact");

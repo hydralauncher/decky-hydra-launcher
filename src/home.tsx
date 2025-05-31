@@ -1,22 +1,22 @@
 import { Button, PanelSection, PanelSectionRow } from "@decky/ui";
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import {
   type GameStats,
   useCurrentGame,
   useLibraryStore,
+  useNavigationStore,
   useUserStore,
 } from "./stores";
 import { api } from "./hydra-api";
 import { usePlaytime } from "./hooks";
+import { HydraLogo } from "./components/hydra-logo";
 
-export interface HomeProps {
-  navigate: (name: string, params: Record<string, string>) => void;
-}
-
-export function Home({ navigate }: HomeProps) {
-  const { user } = useUserStore();
+export function Home() {
+  const { user, hasActiveSubscription } = useUserStore();
   const { library } = useLibraryStore();
   const { hours, minutes, seconds } = usePlaytime();
+
+  const { setRoute } = useNavigationStore();
 
   const { objectId, gameStats, setGameStats } = useCurrentGame();
 
@@ -39,26 +39,9 @@ export function Home({ navigate }: HomeProps) {
     }
   }, [objectId]);
 
-  return (
-    <>
-      <div className="user-panel">
-        <Button className="user-panel__avatar">
-          <img
-            src={user?.profileImageUrl}
-            width="64"
-            height="64"
-            className="user-panel__avatar-image"
-            alt={user?.displayName}
-          />
-        </Button>
-
-        <div style={{ display: "flex", flexDirection: "column" }}>
-          <span className="user-panel__display-name">{user?.displayName}</span>
-          <span className="user-panel__username">{user?.username}</span>
-        </div>
-      </div>
-
-      <PanelSection title="Playing now">
+  const playingNowContent = useMemo(() => {
+    if (objectId) {
+      return (
         <Button className="game-cover">
           <img
             src={gameStats?.assets.coverImageUrl}
@@ -83,9 +66,48 @@ export function Home({ navigate }: HomeProps) {
             </span>
           </div>
         </Button>
-      </PanelSection>
+      );
+    }
 
-      <PanelSection title="Library">
+    return (
+      <div className="playtime-description">
+        <span>No game session in progress.</span>
+
+        <span>
+          Whenever you play a game, your session playtime will show up here.
+        </span>
+      </div>
+    );
+  }, [gameStats, objectId, setRoute]);
+
+  return (
+    <>
+      <div className="user-panel">
+        <Button className="user-panel__avatar">
+          <img
+            src={user?.profileImageUrl}
+            width="64"
+            height="64"
+            className="user-panel__avatar-image"
+            alt={user?.displayName}
+          />
+        </Button>
+
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          <span className="user-panel__display-name">{user?.displayName}</span>
+          <span className="user-panel__username">{user?.username}</span>
+          {hasActiveSubscription && (
+            <span className="user-panel__subscription-badge">
+              <HydraLogo />
+              Cloud
+            </span>
+          )}
+        </div>
+      </div>
+
+      <PanelSection title="Playing now">{playingNowContent}</PanelSection>
+
+      <PanelSection title="Playable on the Deck">
         <div className="library-games">
           {library
             .filter((game) => game.winePrefixPath)
@@ -95,9 +117,11 @@ export function Home({ navigate }: HomeProps) {
                   key={game.remoteId}
                   className="library-game"
                   onClick={() =>
-                    navigate("game", {
-                      objectId: game.objectId,
-                      winePrefixPath: game.winePrefixPath!,
+                    setRoute({
+                      name: "game",
+                      params: {
+                        game,
+                      },
                     })
                   }
                 >
@@ -105,6 +129,7 @@ export function Home({ navigate }: HomeProps) {
                     src={game.iconUrl}
                     width="30"
                     style={{ borderRadius: 8, objectFit: "cover" }}
+                    alt={game.title}
                   />
                   <span className="library-game__title">{game.title}</span>
                 </Button>

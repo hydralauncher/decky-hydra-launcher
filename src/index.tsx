@@ -1,7 +1,6 @@
 import { staticClasses } from "@decky/ui";
 import { definePlugin, toaster } from "@decky/api";
-import { useCallback, useMemo, useState } from "react";
-import { FaShip } from "react-icons/fa";
+import { useEffect, useMemo } from "react";
 import { AppLifetimeNotification } from "@decky/ui/dist/globals/steam-client/GameSessions";
 import styles from "./styles/globals.scss";
 import {
@@ -9,6 +8,7 @@ import {
   useAuthStore,
   useCurrentGame,
   useLibraryStore,
+  useNavigationStore,
   useUserStore,
 } from "./stores";
 import { api } from "./hydra-api";
@@ -19,39 +19,36 @@ import { GameCloudSaves } from "./game-cloud-saves";
 import { AuthGuide } from "./auth-guide";
 import { backupAndUpload, getLibrary, isHydraLauncherRunning } from "./events";
 import { getAuth } from "./events";
+import { HydraLogo } from "./components";
 
 function Plugin() {
-  const [route, setRoute] = useState<{
-    name: string;
-    params: Record<string, string>;
-  } | null>({
-    name: "auth-guide",
-    params: {},
-  });
+  const { route, setRoute } = useNavigationStore();
+  const { auth } = useAuthStore();
 
-  const navigate = useCallback(
-    (name: string, params: Record<string, string>) => {
+  useEffect(() => {
+    if (!auth) {
       setRoute({
-        name,
-        params,
+        name: "auth-guide",
+        params: {},
       });
-    },
-    []
-  );
+    } else {
+      setRoute({
+        name: "home",
+        params: {},
+      });
+    }
+  }, [auth]);
 
   const content = useMemo(() => {
     switch (route?.name) {
       case "auth-guide":
         return <AuthGuide />;
       case "game":
-        return (
-          <GameCloudSaves
-            objectId={route.params.objectId}
-            winePrefixPath={route.params.winePrefixPath}
-          />
-        );
+        return <GameCloudSaves game={route.params.game} />;
+      case "home":
+        return <Home />;
       default:
-        return <Home navigate={navigate} />;
+        return null;
     }
   }, [route]);
 
@@ -79,6 +76,7 @@ const onAppLifetimeNotification = async (
   } = useCurrentGame.getState();
   const { setLibrary } = useLibraryStore.getState();
   const { auth } = useAuthStore.getState();
+  const { hasActiveSubscription } = useUserStore.getState();
 
   if (updateInterval) {
     clearInterval(updateInterval);
@@ -141,7 +139,12 @@ const onAppLifetimeNotification = async (
     const isHydraRunning = await isHydraLauncherRunning();
 
     // Check if there's any chance for the accessToken to be expired
-    if (game.automaticCloudSync && auth && !isHydraRunning) {
+    if (
+      game.automaticCloudSync &&
+      auth &&
+      hasActiveSubscription &&
+      !isHydraRunning
+    ) {
       await backupAndUpload(
         game.objectId,
         game.winePrefixPath,
@@ -161,21 +164,34 @@ export default definePlugin(() => {
   const { setAuth } = useAuthStore.getState();
   const { setUser } = useUserStore.getState();
   const { setLibrary } = useLibraryStore.getState();
+  const { setRoute } = useNavigationStore.getState();
 
-  getAuth().then((auth) => {
-    setAuth(auth);
+  getAuth()
+    .then((auth) => {
+      setAuth(auth);
 
-    api
-      .get<User>("profile/me")
-      .json()
-      .then((user) => {
-        setUser(user);
+      setRoute({
+        name: "home",
+        params: {},
       });
 
-    getLibrary().then((library) => setLibrary(library));
+      api
+        .get<User>("profile/me")
+        .json()
+        .then((user) => {
+          setUser(user);
+        });
 
-    WSClient.connect();
-  });
+      getLibrary().then((library) => setLibrary(library));
+
+      WSClient.connect();
+    })
+    .catch(() => {
+      setRoute({
+        name: "auth-guide",
+        params: {},
+      });
+    });
 
   const { unregister: removeGameExecutionListener } =
     SteamClient.GameSessions.RegisterForAppLifetimeNotifications(
@@ -186,7 +202,7 @@ export default definePlugin(() => {
     name: "Hydra",
     titleView: <div className={staticClasses.Title}>Hydra</div>,
     content: <Plugin />,
-    icon: <FaShip />,
+    icon: <HydraLogo />,
     onDismount() {
       removeGameExecutionListener();
 

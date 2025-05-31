@@ -2,7 +2,7 @@
   display: flex;
   justify-content: center;
   position: relative;
-  height: 342px;
+  height: 268px;
   width: 100%;
   border-radius: 8px;
   overflow: hidden;
@@ -85,6 +85,26 @@
     font-weight: 400;
     color: rgba(255, 255, 255, 0.5);
   }
+
+  &__subscription-badge {
+    background: linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.1) 0%,
+        rgba(0, 0, 0, 0.1) 100%
+      ),
+      linear-gradient(93deg, #0cf1ca 0.01%, #1dcceb 50%, #134fd0 99.99%);
+    display: flex;
+    align-self: flex-start;
+    padding: 2px 8px;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    border-radius: 4px;
+    color: #fff;
+    font-weight: 700;
+    font-size: 12px;
+    margin-top: 4px;
+  }
 }
 
 .library-games {
@@ -102,11 +122,97 @@
   border: none;
   gap: 8px;
   color: rgba(255, 255, 255, 0.8);
+
+  &__title {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
 }
 
-.library-game__title {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
+.auth-guide {
+  display: flex;
+  box-sizing: border-box;
+  padding: 0 16px;
+  flex-direction: column;
+  gap: 16px;
+
+  &__text {
+    text-align: center;
+    font-size: 16px;
+    margin: 0;
+    font-weight: 400;
+  }
+
+  &__qr-code {
+    display: flex;
+    align-self: center;
+    background-color: rgba(255, 255, 255, 0.08);
+    padding: 16px;
+    border: none;
+  }
+
+  &__link {
+    border: none;
+    background-color: transparent;
+    color: rgba(255, 255, 255, 0.8);
+    font-weight: 700;
+  }
+}
+
+.playtime-description {
+  text-align: center;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 268px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.game-cloud-saves {
+  &__header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  &__cloud-saves {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  &__new-backup {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.8);
+    padding: 8px;
+    border: none;
+    gap: 8px;
+  }
+
+  &__cloud-save {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.08);
+    border: none;
+    gap: 8px;
+    color: rgba(255, 255, 255, 0.8);
+    padding: 8px;
+
+    &__title {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+  }
 }

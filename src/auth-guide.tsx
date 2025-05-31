@@ -1,28 +1,37 @@
 import { Button } from "@decky/ui";
-import { QRCode } from "./qr-code";
+import { QRCodeSVG } from "qrcode.react";
+
+export const GUIDE_URL = "https://hydra.la/decky-guide";
 
 export function AuthGuide() {
   return (
-    <div
-      style={{
-        display: "flex",
-        width: "100%",
-        height: "100%",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-    >
-      <h2>
-        You must install and connect your Hydra account in order to use this
-        plugin.
+    <div className="auth-guide">
+      <h2 className="auth-guide__text">
+        You must install and connect your <strong>Hydra</strong> account in
+        order to use this plugin.
       </h2>
 
-      <QRCode />
+      <Button className="auth-guide__qr-code">
+        <QRCodeSVG
+          value={GUIDE_URL}
+          width="163px"
+          height="163px"
+          bgColor="transparent"
+          fgColor="#FFFFFF"
+        />
+      </Button>
 
-      <h2>
+      <h2 className="auth-guide__text">
         Learn more at:
-        <br /> <Button>https://hy.dra/decky</Button>
+        <br />{" "}
+        <Button
+          className="auth-guide__link"
+          onClick={() => {
+            window.open(GUIDE_URL, "_blank");
+          }}
+        >
+          {GUIDE_URL}
+        </Button>
       </h2>
     </div>
   );
