@@ -4,7 +4,6 @@ import { useEffect, useMemo } from "react";
 import { AppLifetimeNotification } from "@decky/ui/dist/globals/steam-client/GameSessions";
 import styles from "./styles/globals.scss";
 import {
-  type User,
   useAuthStore,
   useCurrentGame,
   useLibraryStore,
@@ -21,6 +20,7 @@ import { backupAndUpload, getLibrary, isHydraLauncherRunning } from "./events";
 import { getAuth } from "./events";
 import { HydraLogo } from "./components";
 import { formatDate } from "./hooks";
+import type { Game, User } from "./api-types";
 
 function Plugin() {
   const { route, setRoute } = useNavigationStore();
@@ -38,14 +38,14 @@ function Plugin() {
         params: {},
       });
     }
-  }, [auth]);
+  }, [auth, setRoute]);
 
   const content = useMemo(() => {
     switch (route?.name) {
       case "auth-guide":
         return <AuthGuide />;
       case "game":
-        return <GameCloudSaves game={route.params.game} />;
+        return <GameCloudSaves game={route.params.game as Game} />;
       case "home":
         return <Home />;
       default:

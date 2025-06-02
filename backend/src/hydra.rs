@@ -14,7 +14,7 @@ use serde_json::json;
 use std::collections::HashMap;
 
 use crate::ludusavi::backup_game;
-use crate::wine::{add_wine_prefix_to_windows_path, get_windows_like_user_profile_path, normalize_path, transform_ludusavi_backup_path_into_windows_path};
+use crate::wine::{add_wine_prefix_to_windows_path, get_windows_like_user_profile_path, transform_ludusavi_backup_path_into_windows_path};
 
 struct Snapshot {
     db: DB,
@@ -239,7 +239,7 @@ fn restore_ludusavi_backup(
 
             let destination_path = transform_ludusavi_backup_path_into_windows_path(key, artifact_wine_prefix_path)
                 .replacen(
-                    normalize_path(&user_profile_path).as_str(),
+                    home_dir,
                     &add_wine_prefix_to_windows_path(&user_profile_path, wine_prefix_path),
                     1,
                 )
@@ -274,8 +274,8 @@ pub async fn download_game_artifact(
     download_url: &str,
     object_key: &str,
     home_dir: &str,
+    wine_prefix_path: Option<&str>,
     artifact_wine_prefix_path: Option<&str>,
-    wine_prefix_path: Option<&str>
 ) -> Result<(), Box<dyn std::error::Error>> {
     let backups_path = dirs::config_dir()
         .unwrap()

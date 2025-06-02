@@ -179,11 +179,16 @@
     margin-bottom: 16px;
   }
 
+  &__info {
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.5);
+  }
+
   &__automatic-backups {
     display: flex;
-    gap: 8px;
+    gap: 4px;
     align-items: center;
-    font-size: 14px;
+    font-size: 12px;
   }
 
   &__details {
@@ -230,20 +235,28 @@
     padding: 8px;
     overflow: hidden;
 
+    p {
+      margin: 0;
+    }
+
     &__title {
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
       min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
     }
 
-    &__date {
+    &__detail {
       font-size: 12px;
       color: rgba(255, 255, 255, 0.5);
     }
   }
 
-  &__info {
+  &__used-slots {
     font-size: 14px;
     margin-top: 16px;
     display: block;

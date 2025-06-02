@@ -1,7 +1,6 @@
 import { Button, PanelSection, PanelSectionRow } from "@decky/ui";
 import { useCallback, useEffect, useMemo } from "react";
 import {
-  type GameStats,
   useCurrentGame,
   useLibraryStore,
   useNavigationStore,
@@ -10,6 +9,7 @@ import {
 import { api } from "./hydra-api";
 import { usePlaytime } from "./hooks";
 import { HydraLogo } from "./components/hydra-logo";
+import type { GameStats } from "./api-types";
 
 export function Home() {
   const { user, hasActiveSubscription } = useUserStore();
@@ -31,13 +31,13 @@ export function Home() {
       .json();
 
     setGameStats(stats);
-  }, [objectId]);
+  }, [objectId, setGameStats]);
 
   useEffect(() => {
     if (objectId) {
       getGameCurrentlyPlaying();
     }
-  }, [objectId]);
+  }, [objectId, getGameCurrentlyPlaying]);
 
   const playingNowContent = useMemo(() => {
     if (objectId) {
@@ -78,7 +78,7 @@ export function Home() {
         </span>
       </div>
     );
-  }, [gameStats, objectId, setRoute, hours, minutes, seconds]);
+  }, [gameStats, objectId, hours, minutes, seconds]);
 
   return (
     <>

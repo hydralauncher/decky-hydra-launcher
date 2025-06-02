@@ -1,12 +1,5 @@
 import { create } from "zustand";
-
-export interface GameStats {
-  assets: {
-    title: string;
-    coverImageUrl: string;
-    iconUrl: string;
-  };
-}
+import type { GameStats } from "../api-types";
 
 interface CurrentGameStore {
   objectId: string | null;

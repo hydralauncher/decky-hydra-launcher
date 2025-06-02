@@ -1,14 +1,5 @@
 import { create } from "zustand";
-
-export interface Game {
-  remoteId: string;
-  title: string;
-  iconUrl: string;
-  objectId: string;
-  shop: "steam";
-  winePrefixPath: string | null;
-  automaticCloudSync: boolean;
-}
+import type { Game } from "../api-types";
 
 interface LibraryStore {
   library: Game[];

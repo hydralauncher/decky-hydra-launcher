@@ -1,17 +1,5 @@
 import { create } from "zustand";
-
-export interface User {
-  id: string;
-  username: string;
-  displayName: string;
-  profileImageUrl: string;
-  subscription?: {
-    expiresAt: string | null;
-  };
-  quirks: {
-    backupsPerGameLimit: number;
-  };
-}
+import type { User } from "../api-types";
 
 interface UserStore {
   user: User | null;

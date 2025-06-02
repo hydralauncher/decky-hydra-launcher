@@ -1,40 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./hydra-api";
 import { toaster } from "@decky/api";
-import { Button, PanelSection } from "@decky/ui";
+import { Button, PanelSection, Spinner } from "@decky/ui";
 import { composeToastLogo } from "./helpers";
-import {
-  useAuthStore,
-  useCurrentGame,
-  useUserStore,
-  type Game,
-} from "./stores";
-import { backupAndUpload, downloadGameArtifact } from "./events";
+import { useAuthStore, useCurrentGame, useUserStore } from "./stores";
+import { backupAndUpload } from "./events";
 import { CheckIcon, CloudIcon } from "./components";
 import { useDate } from "./hooks";
-
-interface GameArtifact {
-  id: string;
-  artifactLengthInBytes: number;
-  downloadOptionTitle: string | null;
-  createdAt: string;
-  updatedAt: string;
-  hostname: string;
-  downloadCount: number;
-  label?: string;
-}
+import { GameCloudSave } from "./game-cloud-save";
+import type { Game, GameArtifact } from "./api-types";
 
 export interface GameCloudSavesProps {
   game: Game;
 }
 
 export function GameCloudSaves({ game }: GameCloudSavesProps) {
+  const [isCreatingBackup, setIsCreatingBackup] = useState(false);
   const [artifacts, setArtifacts] = useState<GameArtifact[]>([]);
+
   const { auth } = useAuthStore();
   const { user, hasActiveSubscription } = useUserStore();
   const { objectId } = useCurrentGame();
 
-  const { formatDate, formatDateTime } = useDate();
+  const { formatDate } = useDate();
 
   const isGameRunning = objectId === game.objectId;
 
@@ -52,34 +40,10 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     getArtifacts();
   }, [getArtifacts]);
 
-  const downloadArtifact = useCallback(async (artifact: GameArtifact) => {
-    const response = await api
-      .post<{
-        downloadUrl: string;
-        objectKey: string;
-        homeDir: string;
-        winePrefixPath: string | null;
-      }>(`profile/games/artifacts/${artifact.id}/download`)
-      .json();
-
-    await downloadGameArtifact(
-      game.objectId,
-      response.downloadUrl,
-      response.objectKey,
-      response.homeDir,
-      response.winePrefixPath,
-      game.winePrefixPath!
-    );
-
-    toaster.toast({
-      title: "Backup restored",
-      body: "The game backup has been restored",
-      logo: composeToastLogo(game.iconUrl),
-    });
-  }, []);
-
   const createNewBackup = useCallback(async () => {
     if (game.automaticCloudSync && auth && hasActiveSubscription) {
+      setIsCreatingBackup(true);
+
       try {
         await backupAndUpload(
           game.objectId,
@@ -95,11 +59,15 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         });
 
         getArtifacts();
-      } catch (error) {
+      } catch (error: unknown) {
+        console.error(error);
+
         toaster.toast({
           title: "Failed to create backup",
           body: "Please check if all game files are correct",
         });
+      } finally {
+        setIsCreatingBackup(false);
       }
     }
   }, [
@@ -109,6 +77,8 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     game.winePrefixPath,
     hasActiveSubscription,
     formatDate,
+    game.iconUrl,
+    getArtifacts,
   ]);
 
   return (
@@ -122,7 +92,21 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
             alt={game.title}
           />
 
-          <span style={{ fontWeight: 700 }}>{game.title}</span>
+          <div>
+            <span
+              style={{ fontWeight: 700, color: "rgba(255, 255, 255, 0.8)" }}
+            >
+              {game.title}
+            </span>
+
+            {game.automaticCloudSync && (
+              <div className="game-cloud-saves__automatic-backups">
+                <CheckIcon />
+
+                <span>Automatic backups enabled</span>
+              </div>
+            )}
+          </div>
         </div>
 
         {isGameRunning && (
@@ -132,13 +116,9 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
           </span>
         )}
 
-        {game.automaticCloudSync && (
-          <div className="game-cloud-saves__automatic-backups">
-            <CheckIcon />
-
-            <span>Automatic backups enabled</span>
-          </div>
-        )}
+        <span className="game-cloud-saves__info">
+          Press any of the backups below to replace your current save.
+        </span>
       </div>
 
       <div className="game-cloud-saves__cloud-saves">
@@ -147,30 +127,29 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
           onClick={createNewBackup}
           disabled={isGameRunning}
         >
-          <CloudIcon />
-          New Backup
+          {isCreatingBackup ? (
+            <>
+              <Spinner width={15} />
+              Creating backup...
+            </>
+          ) : (
+            <>
+              <CloudIcon />
+              New Backup
+            </>
+          )}
         </Button>
 
         {artifacts.map((artifact) => (
-          <Button
-            key={artifact.id}
-            className="game-cloud-saves__cloud-save"
-            onClick={() => downloadArtifact(artifact)}
-            disabled={isGameRunning}
-          >
-            <span className="game-cloud-saves__cloud-save__title">
-              {artifact.label ??
-                `Backup from ${formatDate(artifact.createdAt)}`}
-            </span>
-
-            <span className="game-cloud-saves__cloud-save__date">
-              {formatDateTime(artifact.createdAt)}
-            </span>
-          </Button>
+          <GameCloudSave
+            artifact={artifact}
+            game={game}
+            isGameRunning={isGameRunning}
+          />
         ))}
       </div>
 
-      <span className="game-cloud-saves__info">
+      <span className="game-cloud-saves__used-slots">
         {artifacts.length}/{user?.quirks.backupsPerGameLimit ?? 4} save slots
         used
       </span>

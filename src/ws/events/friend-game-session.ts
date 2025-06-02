@@ -2,9 +2,9 @@ import { toaster } from "@decky/api";
 
 import type { FriendGameSession } from "../../generated/envelope";
 import { api } from "../../hydra-api";
-import { GameStats } from "../../stores/current-game.store";
 import { composeToastLogo } from "../../helpers";
 import type { UserProfile } from "./types";
+import type { GameStats } from "../../api-types";
 
 export const friendGameSessionEvent = async (payload: FriendGameSession) => {
   const [friend, gameStats] = await Promise.all([

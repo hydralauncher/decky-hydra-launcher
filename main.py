@@ -22,6 +22,10 @@ class Plugin:
     async def download_game_artifact(self, object_id: str, download_url: str, object_key: str, home_dir: str, wine_prefix: str, artifact_wine_prefix: str):
         subprocess.run([BACKEND_PATH, "download-game-artifact", object_id, download_url, object_key, home_dir, wine_prefix, artifact_wine_prefix], capture_output=True, text=True, check=True)
 
+    async def check_if_ludusavi_binary_exists(self):
+        result = subprocess.run([BACKEND_PATH, "check-if-ludusavi-binary-exists"], capture_output=True, text=True, check=True)
+        return result.stdout.strip() == "true"
+
     async def is_hydra_launcher_running(self):
         temp_dir = tempfile.gettempdir()
         lockfile = f"{temp_dir}/hydra-launcher.lock"

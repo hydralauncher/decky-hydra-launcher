@@ -1,10 +1,5 @@
 import { create } from "zustand";
-
-export interface Auth {
-  accessToken: string;
-  refreshToken: string;
-  tokenExpirationTimestamp: number;
-}
+import type { Auth } from "../api-types";
 
 interface AuthStore {
   auth: Auth | null;

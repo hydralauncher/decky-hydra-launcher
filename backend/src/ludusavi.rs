@@ -8,6 +8,12 @@ fn get_ludusavi_path() -> PathBuf {
         .join("ludusavi")
 }
 
+pub fn check_if_ludusavi_binary_exists() -> bool {
+    let ludusavi_path = get_ludusavi_path();
+    let ludusavi_binary_path = ludusavi_path.join("ludusavi");
+    ludusavi_binary_path.exists()
+}
+
 pub async fn backup_game(
     object_id: &str,
     backup_path: Option<&str>,
