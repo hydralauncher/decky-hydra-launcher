@@ -215,7 +215,7 @@ fn restore_ludusavi_backup(
     title: &str,
     home_dir: &str,
     wine_prefix_path: Option<&str>,
-    artifact_wine_prefix_path: Option<&str>,
+    artifact_wine_prefix_path: Option<String>,
 ) -> std::io::Result<()> {
     let game_backup_path = backup_path.join(title);
     let mapping_yaml_path = game_backup_path.join("mapping.yaml");
@@ -237,7 +237,7 @@ fn restore_ludusavi_backup(
 
             let public_path = "C:/users/Public";
 
-            let destination_path = transform_ludusavi_backup_path_into_windows_path(key, artifact_wine_prefix_path)
+            let destination_path = transform_ludusavi_backup_path_into_windows_path(key, artifact_wine_prefix_path.clone())
                 .replacen(
                     home_dir,
                     &add_wine_prefix_to_windows_path(&user_profile_path, wine_prefix_path),
@@ -275,7 +275,7 @@ pub async fn download_game_artifact(
     object_key: &str,
     home_dir: &str,
     wine_prefix_path: Option<&str>,
-    artifact_wine_prefix_path: Option<&str>,
+    artifact_wine_prefix_path: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let backups_path = dirs::config_dir()
         .unwrap()

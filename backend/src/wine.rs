@@ -131,12 +131,12 @@ pub fn add_trailing_slash(path: &str) -> String {
 
 pub fn transform_ludusavi_backup_path_into_windows_path(
     backup_path: &str,
-    wine_prefix_path: Option<&str>,
+    wine_prefix_path: Option<String>,
 ) -> String {
     let mut path = backup_path.to_string();
 
     if let Some(prefix) = wine_prefix_path {
-        let normalized_prefix = add_trailing_slash(prefix);
+        let normalized_prefix = add_trailing_slash(&prefix);
         path = path.replace(&normalized_prefix, "");
     }
 

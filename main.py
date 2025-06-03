@@ -19,8 +19,8 @@ class Plugin:
     async def backup_and_upload(self, object_id: str, wine_prefix: str, access_token: str, label: str):
         subprocess.run([BACKEND_PATH, "backup-and-upload", object_id, wine_prefix, access_token, label], capture_output=True, text=True, check=True)
 
-    async def download_game_artifact(self, object_id: str, download_url: str, object_key: str, home_dir: str, wine_prefix: str, artifact_wine_prefix: str):
-        subprocess.run([BACKEND_PATH, "download-game-artifact", object_id, download_url, object_key, home_dir, wine_prefix, artifact_wine_prefix], capture_output=True, text=True, check=True)
+    async def download_game_artifact(self, object_id: str, download_url: str, object_key: str, home_dir: str, wine_prefix: str, artifact_wine_prefix: str | None):
+        subprocess.run([BACKEND_PATH, "download-game-artifact", object_id, download_url, object_key, home_dir, wine_prefix, artifact_wine_prefix or ""], capture_output=True, text=True, check=True)
 
     async def check_if_ludusavi_binary_exists(self):
         result = subprocess.run([BACKEND_PATH, "check-if-ludusavi-binary-exists"], capture_output=True, text=True, check=True)

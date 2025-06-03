@@ -37,9 +37,9 @@ async fn main() {
             let object_key = std::env::args().nth(4).expect("no object key given");
             let home_dir = std::env::args().nth(5).expect("no home dir given");
             let wine_prefix = std::env::args().nth(6).expect("no wine prefix given");
-            let artifact_wine_prefix = std::env::args().nth(7).expect("no artifact wine prefix given");
+            let artifact_wine_prefix = std::env::args().nth(7);
 
-            download_game_artifact(&object_id, "steam", &download_url, &object_key, &home_dir, Some(&wine_prefix), Some(&artifact_wine_prefix)).await.unwrap();
+            download_game_artifact(&object_id, "steam", &download_url, &object_key, &home_dir, Some(&wine_prefix), artifact_wine_prefix).await.unwrap();
         }
         "check-if-ludusavi-binary-exists" => {
             let exists = check_if_ludusavi_binary_exists();
