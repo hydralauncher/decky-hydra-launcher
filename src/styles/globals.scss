@@ -118,8 +118,6 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
-
-  @include focus-outline;
 }
 
 .library-game {
@@ -132,10 +130,12 @@
   gap: 8px;
   color: rgba(255, 255, 255, 0.8);
 
+  @include focus-outline;
+
   &__title {
     white-space: nowrap;
     text-overflow: ellipsis;
-    min-width: 0;
+    overflow: hidden;
   }
 }
 
@@ -232,43 +232,39 @@
     display: block;
   }
 
-  &__cloud-save {
-    width: 100%;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    border-radius: 4px;
-    background-color: rgba(255, 255, 255, 0.08);
-    border: none;
-    gap: 4px;
-    color: rgba(255, 255, 255, 0.8);
-    padding: 8px;
-
-    @include focus-outline;
-
-    p {
-      margin: 0;
-    }
-
-    &__title {
-      white-space: nowrap;
-      text-overflow: ellipsis;
-      min-width: 0;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      width: 100%;
-    }
-
-    &__detail {
-      font-size: 12px;
-      color: rgba(255, 255, 255, 0.5);
-    }
-  }
-
   &__used-slots {
     font-size: 14px;
     margin-top: 16px;
     display: block;
+  }
+}
+
+.cloud-save {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  border-radius: 4px;
+  background-color: rgba(255, 255, 255, 0.08);
+  border: none;
+  gap: 4px;
+  color: rgba(255, 255, 255, 0.8);
+  padding: 8px;
+
+  @include focus-outline;
+
+  p {
+    margin: 0;
+    min-width: 0;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    display: block;
+    max-width: 100%;
+  }
+
+  &__detail {
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.5);
   }
 }

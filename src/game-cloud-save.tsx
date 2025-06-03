@@ -6,7 +6,7 @@ import { api } from "./hydra-api";
 import { downloadGameArtifact } from "./events";
 import type { Game, GameArtifact } from "./api-types";
 import { toaster } from "@decky/api";
-import { composeToastLogo } from "./helpers";
+import { composeToastLogo, formatBytes } from "./helpers";
 
 export interface GameCloudSaveProps {
   artifact: GameArtifact;
@@ -76,21 +76,17 @@ export function GameCloudSave({
   return (
     <Button
       key={artifact.id}
-      className="game-cloud-saves__cloud-save"
+      className="cloud-save"
       onClick={confirmArtifactDownload}
       disabled={isGameRunning}
     >
-      <p className="game-cloud-saves__cloud-save__title">
-        {artifact.label ?? `Backup from ${formatDate(artifact.createdAt)}`}
+      <p>{artifact.label ?? `Backup from ${formatDate(artifact.createdAt)}`}</p>
+
+      <p className="cloud-save__detail">
+        {formatBytes(artifact.artifactLengthInBytes)} - {artifact.hostname}
       </p>
 
-      <p className="game-cloud-saves__cloud-save__detail">
-        {artifact.hostname}
-      </p>
-
-      <p className="game-cloud-saves__cloud-save__detail">
-        {formatDateTime(artifact.createdAt)}
-      </p>
+      <p className="cloud-save__detail">{formatDateTime(artifact.createdAt)}</p>
     </Button>
   );
 }
