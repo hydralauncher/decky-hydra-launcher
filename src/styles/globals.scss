@@ -16,6 +16,9 @@
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
   background-color: transparent;
   cursor: pointer;
+  overflow: hidden;
+
+  @include focus-outline;
 
   &__image {
     object-fit: cover;
