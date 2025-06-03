@@ -282,8 +282,10 @@ pub async fn download_game_artifact(
         .join("hydralauncher")
         .join("Backups");
 
-    let zip_location = PathBuf::from(&backups_path).join(object_key);
-    let backup_path = PathBuf::from(&backups_path).join(format!("{}-{}", shop, object_id));
+    fs::create_dir_all(&backups_path)?;
+
+    let zip_location = backups_path.join(object_key);
+    let backup_path = backups_path.join(format!("{}-{}", shop, object_id));
 
     if backup_path.exists() {
         fs::remove_dir_all(&backup_path)?;
@@ -295,7 +297,7 @@ pub async fn download_game_artifact(
     let mut file = File::create(&zip_location)?;
 
     while let Some(chunk) = response.chunk().await? {
-        let _ = file.write_all(&chunk);
+        file.write_all(&chunk)?;
     }
 
     fs::create_dir_all(&backup_path)?;

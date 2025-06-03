@@ -1,3 +1,9 @@
+@mixin focus-outline {
+  &:focus-within {
+    outline: 2px solid #fff;
+  }
+}
+
 .game-cover {
   display: flex;
   justify-content: center;
@@ -5,7 +11,6 @@
   height: 268px;
   width: 100%;
   border-radius: 8px;
-  overflow: hidden;
   padding: 0;
   border: none;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
@@ -65,6 +70,8 @@
     padding: 0;
     background-color: transparent;
     border: none;
+
+    @include focus-outline;
   }
 
   &__avatar-image {
@@ -111,6 +118,8 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
+
+  @include focus-outline;
 }
 
 .library-game {
@@ -125,7 +134,6 @@
 
   &__title {
     white-space: nowrap;
-    overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
   }
@@ -213,6 +221,8 @@
     padding: 8px;
     border: none;
     gap: 8px;
+
+    @include focus-outline;
   }
 
   &__warning {
@@ -233,7 +243,8 @@
     gap: 4px;
     color: rgba(255, 255, 255, 0.8);
     padding: 8px;
-    overflow: hidden;
+
+    @include focus-outline;
 
     p {
       margin: 0;
@@ -241,7 +252,6 @@
 
     &__title {
       white-space: nowrap;
-      overflow: hidden;
       text-overflow: ellipsis;
       min-width: 0;
       display: flex;
