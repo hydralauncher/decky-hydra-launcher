@@ -55,6 +55,7 @@ struct Game {
     icon_url: Option<String>,
     wine_prefix_path: Option<String>,
     automatic_cloud_sync: Option<bool>,
+    executable_path: Option<String>,
 }
 
 fn get_leveldb_snapshot() -> Snapshot {
@@ -264,6 +265,36 @@ fn restore_ludusavi_backup(
             fs::rename(source_path, destination_path)?;
         }
     }
+
+    Ok(())
+}
+
+pub fn toggle_automatic_cloud_sync(shop: &str, object_id: &str, automatic_cloud_sync: bool) -> Result<(), String> {
+    let db_path = dirs::config_dir()
+        .unwrap()
+        .join("hydralauncher")
+        .join("hydra-db");
+
+    let key = format!("!games!{}:{}", shop, object_id);
+
+    let mut db = DB::open(&db_path, Options::default())
+        .map_err(|e| format!("Failed to open DB: {:?}", e))?;
+
+    let value = db.get(key.as_bytes())
+        .ok_or_else(|| format!("Game not found: {}", key))?;
+
+    let mut game: serde_json::Value = serde_json::from_slice(&value)
+        .map_err(|e| format!("Failed to parse game: {:?}", e))?;
+
+    game["automaticCloudSync"] = serde_json::json!(automatic_cloud_sync);
+
+    let updated = serde_json::to_vec(&game)
+        .map_err(|e| format!("Failed to serialize game: {:?}", e))?;
+
+    db.put(key.as_bytes(), &updated)
+        .map_err(|e| format!("Failed to write to DB: {:?}", e))?;
+
+    db.close().map_err(|e| format!("Failed to close DB: {:?}", e))?;
 
     Ok(())
 }

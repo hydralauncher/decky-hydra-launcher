@@ -26,6 +26,9 @@ class Plugin:
         result = subprocess.run([BACKEND_PATH, "check-if-ludusavi-binary-exists"], capture_output=True, text=True, check=True)
         return result.stdout.strip() == "true"
 
+    async def toggle_automatic_cloud_sync(self, shop: str, object_id: str, automatic_cloud_sync: bool):
+        subprocess.run([BACKEND_PATH, "toggle-automatic-cloud-sync", shop, object_id, str(automatic_cloud_sync).lower()], capture_output=True, text=True, check=True)
+
     async def is_hydra_launcher_running(self):
         temp_dir = tempfile.gettempdir()
         lockfile = f"{temp_dir}/hydra-launcher.lock"

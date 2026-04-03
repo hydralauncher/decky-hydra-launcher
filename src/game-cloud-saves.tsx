@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./hydra-api";
 import { toaster } from "@decky/api";
-import { Button, PanelSection, Spinner } from "@decky/ui";
+import { Button, PanelSection, Spinner, ToggleField } from "@decky/ui";
 import { composeToastLogo } from "./helpers";
 import { useAuthStore, useCurrentGame, useUserStore } from "./stores";
-import { backupAndUpload } from "./events";
+import { backupAndUpload, toggleAutomaticCloudSync } from "./events";
 import { CheckIcon, CloudIcon } from "./components";
 import { useDate } from "./hooks";
 import { GameCloudSave } from "./game-cloud-save";
@@ -17,6 +17,7 @@ export interface GameCloudSavesProps {
 export function GameCloudSaves({ game }: GameCloudSavesProps) {
   const [isCreatingBackup, setIsCreatingBackup] = useState(false);
   const [artifacts, setArtifacts] = useState<GameArtifact[]>([]);
+  const [automaticCloudSync, setAutomaticCloudSync] = useState(game.automaticCloudSync);
 
   const { auth } = useAuthStore();
   const { user, hasActiveSubscription } = useUserStore();
@@ -40,8 +41,17 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     getArtifacts();
   }, [getArtifacts]);
 
+  const handleToggleCloudSync = useCallback(async (value: boolean) => {
+    try {
+      await toggleAutomaticCloudSync(game.shop, game.objectId, value);
+      setAutomaticCloudSync(value);
+    } catch (error: unknown) {
+      console.error(error);
+    }
+  }, [game.shop, game.objectId]);
+
   const createNewBackup = useCallback(async () => {
-    if (game.automaticCloudSync && auth && hasActiveSubscription) {
+    if (automaticCloudSync && auth && hasActiveSubscription) {
       setIsCreatingBackup(true);
 
       try {
@@ -72,7 +82,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     }
   }, [
     auth,
-    game.automaticCloudSync,
+    automaticCloudSync,
     game.objectId,
     game.winePrefixPath,
     hasActiveSubscription,
@@ -99,7 +109,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
               {game.title}
             </span>
 
-            {game.automaticCloudSync && (
+            {automaticCloudSync && (
               <div className="game-cloud-saves__automatic-backups">
                 <CheckIcon />
 
@@ -120,6 +130,14 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
           Press any of the backups below to replace your current save.
         </span>
       </div>
+
+      {hasActiveSubscription && game.executablePath && (
+        <ToggleField
+          label="Automatic cloud sync"
+          checked={automaticCloudSync}
+          onChange={handleToggleCloudSync}
+        />
+      )}
 
       <div className="game-cloud-saves__cloud-saves">
         <Button

@@ -17,3 +17,6 @@ export const downloadGameArtifact = callable<
 export const checkIfLudusaviBinaryExists = callable<[], boolean>(
   "check_if_ludusavi_binary_exists"
 );
+export const toggleAutomaticCloudSync = callable<[string, string, boolean], void>(
+  "toggle_automatic_cloud_sync"
+);

@@ -1,5 +1,5 @@
 use ludusavi::{get_backup_preview, check_if_ludusavi_binary_exists};
-use hydra::{get_auth, get_library, upload_save_game, download_game_artifact};
+use hydra::{get_auth, get_library, upload_save_game, download_game_artifact, toggle_automatic_cloud_sync};
 
 mod ludusavi;
 mod hydra;
@@ -44,6 +44,12 @@ async fn main() {
         "check-if-ludusavi-binary-exists" => {
             let exists = check_if_ludusavi_binary_exists();
             println!("{}", exists);
+        }
+        "toggle-automatic-cloud-sync" => {
+            let shop = std::env::args().nth(2).expect("no shop given");
+            let object_id = std::env::args().nth(3).expect("no object id given");
+            let automatic_cloud_sync = std::env::args().nth(4).expect("no value given") == "true";
+            toggle_automatic_cloud_sync(&shop, &object_id, automatic_cloud_sync).unwrap();
         }
         _ => {
             println!("Invalid command");
