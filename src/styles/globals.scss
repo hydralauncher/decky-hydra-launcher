@@ -326,6 +326,32 @@
   }
 }
 
+.steam-emu-settings {
+  &__status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 14px;
+  }
+
+  &__button {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.8);
+    padding: 8px;
+    margin-bottom: 8px;
+    border: none;
+    gap: 8px;
+
+    @include focus-outline;
+  }
+}
+
 .cloud-save {
   width: 100%;
   display: flex;

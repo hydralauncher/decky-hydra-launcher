@@ -1,5 +1,5 @@
 import { callable } from "@decky/api";
-import type { Game, Auth, Download } from "./api-types";
+import type { Game, Auth, Download, SteamEmuIniSettings } from "./api-types";
 
 export const getAuth = callable<[], Auth>("get_auth");
 export const getLibrary = callable<[], Game[]>("get_library");
@@ -28,3 +28,11 @@ export const checkIfLudusaviBinaryExists = callable<[], boolean>(
 export const toggleAutomaticCloudSync = callable<[string, string, boolean], void>(
   "toggle_automatic_cloud_sync"
 );
+export const getSteamEmuIniSettings = callable<
+  [string | null, string],
+  SteamEmuIniSettings | null
+>("get_steam_emu_ini_settings");
+export const setSteamEmuIniSettings = callable<
+  [string, string, string],
+  { success: boolean; error?: string }
+>("set_steam_emu_ini_settings");

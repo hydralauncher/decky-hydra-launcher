@@ -3,6 +3,7 @@ import subprocess
 import json
 import tempfile
 import decky
+import steam_emu
 
 PLUGIN_DIR = decky.DECKY_PLUGIN_DIR
 BACKEND_PATH = f"{PLUGIN_DIR}/bin/backend"
@@ -41,6 +42,17 @@ class Plugin:
         return result.stdout.strip() == "true"
 
     async def launch_hydra_background(self):
+        import time
+
+        backoff_until = getattr(self, "_hydra_backoff_until", 0)
+        if time.time() < backoff_until:
+            remaining = int(backoff_until - time.time())
+            decky.logger.warning(f"[Hydra] Skipping launch, backing off for {remaining}s after repeated crashes")
+            return {
+                "success": False,
+                "error": f"Hydra keeps crashing right after starting on this machine. Not retrying for {remaining}s — try updating Hydra Launcher.",
+            }
+
         home = os.path.expanduser("~")
         decky.logger.info(f"[Hydra] Searching for executable, home={home}")
 
@@ -107,8 +119,45 @@ class Plugin:
             decky.logger.error(f"[Hydra] launch_hydra_background unexpected error: {e}")
             return {"success": False, "error": str(e)}
 
+    def _discover_display_env(self):
+        """Find the desktop session's real Wayland socket (or, failing that,
+        its X11 Xauthority cookie). plugin_loader.service runs with no display
+        env at all, so blindly forcing DISPLAY=:0 fails with "Authorization
+        required, but no authorization protocol specified"."""
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        if not os.path.isdir(runtime_dir):
+            return {}
+
+        overrides = {"XDG_RUNTIME_DIR": runtime_dir}
+
+        # Needed for the system tray icon to register with the desktop —
+        # without it Hydra runs fine but shows up nowhere
+        bus_path = os.path.join(runtime_dir, "bus")
+        if os.path.exists(bus_path):
+            overrides["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
+
+        try:
+            entries = sorted(os.listdir(runtime_dir))
+        except Exception as e:
+            decky.logger.error(f"[Hydra] Failed to list {runtime_dir}: {e}")
+            return overrides
+
+        for entry in entries:
+            if entry.startswith("wayland-") and not entry.endswith(".lock"):
+                overrides["WAYLAND_DISPLAY"] = entry
+                return overrides
+
+        for entry in entries:
+            if entry.startswith("xauth_"):
+                overrides["XAUTHORITY"] = os.path.join(runtime_dir, entry)
+                overrides["DISPLAY"] = ":0"
+                return overrides
+
+        return overrides
+
     def _start_hydra(self, executable: str):
         import time
+        import threading
 
         log_path = "/tmp/hydra-decky-launch.log"
         try:
@@ -121,21 +170,38 @@ class Plugin:
                 if old:
                     decky.logger.info(f"[Hydra] Stripped {var}={old}")
 
-            # Ensure a display is set — Gamescope uses Wayland
+            # Ensure a display is set — Gamescope/Plasma use Wayland
+            args = [executable, "--hidden"]
             if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
-                env["DISPLAY"] = ":0"
-                decky.logger.warning("[Hydra] No display env found, forcing DISPLAY=:0")
+                discovered = self._discover_display_env()
+                if discovered:
+                    env.update(discovered)
+                    decky.logger.info(f"[Hydra] Discovered display env: {discovered}")
+                    if discovered.get("WAYLAND_DISPLAY"):
+                        # Electron doesn't auto-switch off X11 just because
+                        # WAYLAND_DISPLAY is set — it needs this explicitly,
+                        # otherwise it fails with "Missing X server or $DISPLAY"
+                        args.append("--ozone-platform=wayland")
+                else:
+                    env["DISPLAY"] = ":0"
+                    decky.logger.warning("[Hydra] No display env found, forcing DISPLAY=:0")
 
             decky.logger.info(f"[Hydra] DISPLAY={env.get('DISPLAY')} WAYLAND_DISPLAY={env.get('WAYLAND_DISPLAY')}")
 
             with open(log_path, "w") as log_file:
                 proc = subprocess.Popen(
-                    [executable, "--hidden"],
+                    args,
                     stdout=log_file,
                     stderr=log_file,
                     start_new_session=True,
                     env=env,
                 )
+
+            # Reap the child whenever it exits, however long that takes, so it
+            # doesn't linger as a zombie under this plugin's process. Also
+            # tracks quick crashes (e.g. a binary incompatible with this CPU)
+            # so we stop hammering relaunches once they clearly aren't working
+            threading.Thread(target=self._on_hydra_exit, args=(proc, time.time()), daemon=True).start()
 
             decky.logger.info(f"[Hydra] Process started pid={proc.pid}, log at {log_path}")
 
@@ -165,6 +231,26 @@ class Plugin:
         except Exception as e:
             decky.logger.error(f"[Hydra] Failed to start {executable}: {e}")
             return {"success": False, "error": f"Failed to start: {e}"}
+
+    def _on_hydra_exit(self, proc, started_at):
+        import time
+
+        proc.wait()
+        ran_for = time.time() - started_at
+
+        # A crash-looping binary (e.g. incompatible with this CPU) dies within
+        # a few seconds to under a minute. A real run lasts much longer, so
+        # any exit past that resets the streak instead of counting as a crash
+        if ran_for >= 60:
+            self._hydra_crash_streak = 0
+            return
+
+        self._hydra_crash_streak = getattr(self, "_hydra_crash_streak", 0) + 1
+        decky.logger.warning(f"[Hydra] Process exited after {ran_for:.1f}s (crash streak={self._hydra_crash_streak})")
+
+        if self._hydra_crash_streak >= 3:
+            self._hydra_backoff_until = time.time() + 300
+            decky.logger.error("[Hydra] 3 quick crashes in a row — backing off launches for 5 minutes")
 
     async def update_game_steam_shortcut(self, shop: str, object_id: str, app_id: int):
         try:
@@ -241,3 +327,9 @@ class Plugin:
         temp_dir = tempfile.gettempdir()
         lockfile = f"{temp_dir}/hydra-launcher.lock"
         return os.path.exists(lockfile)
+
+    async def get_steam_emu_ini_settings(self, executable_path: str | None, title: str):
+        return steam_emu.get_settings(executable_path, title)
+
+    async def set_steam_emu_ini_settings(self, ini_path: str, user_name: str, language: str):
+        return steam_emu.set_settings(ini_path, user_name, language)

@@ -37,6 +37,12 @@ export interface Game {
   executablePath: string | null;
 }
 
+export interface SteamEmuIniSettings {
+  iniPath: string;
+  userName: string;
+  language: string;
+}
+
 export type DownloadStatus =
   | "active"
   | "waiting"
