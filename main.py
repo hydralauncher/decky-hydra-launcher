@@ -8,6 +8,16 @@ import steam_emu
 PLUGIN_DIR = decky.DECKY_PLUGIN_DIR
 BACKEND_PATH = f"{PLUGIN_DIR}/bin/backend"
 
+HYDRA_SHALLOW_SEARCH_TIMEOUT_S = 5
+HYDRA_DEEP_SEARCH_TIMEOUT_S = 20
+HYDRA_LOCKFILE_POLL_INTERVAL_S = 0.5
+HYDRA_LOCKFILE_POLL_ATTEMPTS = 10
+# Below this runtime, an exit counts as a crash rather than a normal quit
+HYDRA_QUICK_CRASH_WINDOW_S = 60
+# Consecutive quick crashes before we stop auto-relaunching for a while
+HYDRA_CRASH_STREAK_LIMIT = 3
+HYDRA_CRASH_BACKOFF_S = 300
+
 class Plugin:
     async def get_auth(self):
         result = subprocess.run([BACKEND_PATH, "get-auth"], capture_output=True, text=True, check=True)
@@ -87,7 +97,7 @@ class Plugin:
                     result = subprocess.run(
                         ["find", directory, "-maxdepth", "2", "-iname", "hydra.appimage",
                          "-o", "-maxdepth", "2", "-iname", "hydra"],
-                        capture_output=True, text=True, timeout=5
+                        capture_output=True, text=True, timeout=HYDRA_SHALLOW_SEARCH_TIMEOUT_S
                     )
                     for line in result.stdout.strip().splitlines():
                         path = line.strip()
@@ -98,11 +108,11 @@ class Plugin:
                     decky.logger.warning(f"[Hydra] Shallow search timed out in {directory}")
 
             # Step 3 — deep: recursive, hard cap at 20s
-            decky.logger.info("[Hydra] Starting deep search (20s timeout)…")
+            decky.logger.info(f"[Hydra] Starting deep search ({HYDRA_DEEP_SEARCH_TIMEOUT_S}s timeout)…")
             try:
                 result = subprocess.run(
                     ["find", home, "-iname", "hydra.appimage", "-o", "-iname", "hydra"],
-                    capture_output=True, text=True, timeout=20
+                    capture_output=True, text=True, timeout=HYDRA_DEEP_SEARCH_TIMEOUT_S
                 )
                 for line in result.stdout.strip().splitlines():
                     path = line.strip()
@@ -205,10 +215,10 @@ class Plugin:
 
             decky.logger.info(f"[Hydra] Process started pid={proc.pid}, log at {log_path}")
 
-            # Wait up to 5s for the lockfile to confirm Hydra actually started
+            # Wait for the lockfile to confirm Hydra actually started
             lockfile = os.path.join(tempfile.gettempdir(), "hydra-launcher.lock")
-            for _ in range(10):
-                time.sleep(0.5)
+            for _ in range(HYDRA_LOCKFILE_POLL_ATTEMPTS):
+                time.sleep(HYDRA_LOCKFILE_POLL_INTERVAL_S)
                 if os.path.exists(lockfile):
                     decky.logger.info("[Hydra] Lockfile confirmed — Hydra is running")
                     return {"success": True, "path": executable}
@@ -225,7 +235,8 @@ class Plugin:
                     pass
                 return {"success": False, "error": f"Hydra exited immediately (code {ret}). Check /tmp/hydra-decky-launch.log"}
 
-            decky.logger.warning("[Hydra] Lockfile not found after 5s but process is still running")
+            wait_total_s = HYDRA_LOCKFILE_POLL_ATTEMPTS * HYDRA_LOCKFILE_POLL_INTERVAL_S
+            decky.logger.warning(f"[Hydra] Lockfile not found after {wait_total_s}s but process is still running")
             return {"success": True, "path": executable}
 
         except Exception as e:
@@ -241,15 +252,15 @@ class Plugin:
         # A crash-looping binary (e.g. incompatible with this CPU) dies within
         # a few seconds to under a minute. A real run lasts much longer, so
         # any exit past that resets the streak instead of counting as a crash
-        if ran_for >= 60:
+        if ran_for >= HYDRA_QUICK_CRASH_WINDOW_S:
             self._hydra_crash_streak = 0
             return
 
         self._hydra_crash_streak = getattr(self, "_hydra_crash_streak", 0) + 1
         decky.logger.warning(f"[Hydra] Process exited after {ran_for:.1f}s (crash streak={self._hydra_crash_streak})")
 
-        if self._hydra_crash_streak >= 3:
-            self._hydra_backoff_until = time.time() + 300
+        if self._hydra_crash_streak >= HYDRA_CRASH_STREAK_LIMIT:
+            self._hydra_backoff_until = time.time() + HYDRA_CRASH_BACKOFF_S
             decky.logger.error("[Hydra] 3 quick crashes in a row — backing off launches for 5 minutes")
 
     async def update_game_steam_shortcut(self, shop: str, object_id: str, app_id: int):

@@ -115,18 +115,37 @@ def set_settings(ini_path: str, user_name: str, language: str):
             lines = f.readlines()
 
         section = None
+        found_username = False
+        found_language = False
+        settings_insert_at = None
         updated_lines = []
         for line in lines:
             stripped = line.strip()
             if stripped.startswith("[") and stripped.endswith("]"):
+                if section == "Settings" and settings_insert_at is None:
+                    settings_insert_at = len(updated_lines)
                 section = stripped[1:-1]
                 updated_lines.append(line)
             elif section == "Settings" and stripped.startswith(USERNAME_KEY):
                 updated_lines.append(f"{USERNAME_KEY}{user_name}\n")
+                found_username = True
             elif section == "Settings" and stripped.startswith(LANGUAGE_KEY):
                 updated_lines.append(f"{LANGUAGE_KEY}{language}\n")
+                found_language = True
             else:
                 updated_lines.append(line)
+
+        # A key may be present in the file but blank (get_settings still
+        # surfaces it), so insert whichever one is actually missing instead
+        # of silently dropping it
+        missing_lines = []
+        if not found_username:
+            missing_lines.append(f"{USERNAME_KEY}{user_name}\n")
+        if not found_language:
+            missing_lines.append(f"{LANGUAGE_KEY}{language}\n")
+        if missing_lines:
+            insert_at = settings_insert_at if settings_insert_at is not None else len(updated_lines)
+            updated_lines[insert_at:insert_at] = missing_lines
 
         with open(ini_path, "w", encoding="utf-8") as f:
             f.writelines(updated_lines)
