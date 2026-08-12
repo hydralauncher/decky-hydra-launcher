@@ -67,14 +67,14 @@ class Plugin:
         decky.logger.info(f"[Hydra] Searching for executable, home={home}")
 
         try:
-            # Step 1 — fast: known fixed paths (no filesystem scan)
+            # Step 1 — fast: known fixed paths (no filesystem scan). Hydra
+            # Launcher is only ever distributed as an AppImage, so we don't
+            # guess at a bare "hydra" binary in system dirs — that name
+            # collides with unrelated tools (e.g. THC-Hydra installs its
+            # binary at exactly /usr/bin/hydra)
             fast_candidates = [
                 f"{home}/AppImages/hydra.AppImage",
                 f"{home}/Applications/hydra.AppImage",
-                f"{home}/.local/bin/hydra",
-                "/usr/bin/hydra",
-                "/usr/local/bin/hydra",
-                "/opt/hydra/hydra",
             ]
             for path in fast_candidates:
                 if os.path.isfile(path) and os.access(path, os.X_OK):
@@ -95,8 +95,7 @@ class Plugin:
                     continue
                 try:
                     result = subprocess.run(
-                        ["find", directory, "-maxdepth", "2", "-iname", "hydra.appimage",
-                         "-o", "-maxdepth", "2", "-iname", "hydra"],
+                        ["find", directory, "-maxdepth", "2", "-iname", "hydra.appimage"],
                         capture_output=True, text=True, timeout=HYDRA_SHALLOW_SEARCH_TIMEOUT_S
                     )
                     for line in result.stdout.strip().splitlines():
@@ -111,7 +110,7 @@ class Plugin:
             decky.logger.info(f"[Hydra] Starting deep search ({HYDRA_DEEP_SEARCH_TIMEOUT_S}s timeout)…")
             try:
                 result = subprocess.run(
-                    ["find", home, "-iname", "hydra.appimage", "-o", "-iname", "hydra"],
+                    ["find", home, "-iname", "hydra.appimage"],
                     capture_output=True, text=True, timeout=HYDRA_DEEP_SEARCH_TIMEOUT_S
                 )
                 for line in result.stdout.strip().splitlines():
