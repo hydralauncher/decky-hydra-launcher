@@ -22,7 +22,7 @@ export function Home() {
   const { setRoute } = useNavigationStore();
   const { objectId, gameAssets } = useCurrentGame();
 
-  const [showLaunchButton, setShowLaunchButton] = useState(false);
+  const [isRunning, setIsRunning] = useState<boolean | null>(null);
   const [launchState, setLaunchState] = useState<LaunchState>("idle");
 
   const tryLaunchHydra = async (): Promise<boolean> => {
@@ -53,11 +53,12 @@ export function Home() {
     const init = async () => {
       try {
         const running = await isHydraLauncherRunning();
-        if (running) { setShowLaunchButton(false); return; }
+        setIsRunning(running);
+        if (running) return;
         const ok = await tryLaunchHydra();
-        if (!ok) setShowLaunchButton(true);
+        setIsRunning(ok);
       } catch {
-        setShowLaunchButton(true);
+        setIsRunning(false);
       }
     };
     init();
@@ -68,7 +69,7 @@ export function Home() {
     const interval = setInterval(async () => {
       try {
         const running = await isHydraLauncherRunning();
-        if (running) setShowLaunchButton(false);
+        setIsRunning(running);
       } catch {}
     }, 3_000);
     return () => clearInterval(interval);
@@ -84,6 +85,7 @@ export function Home() {
 
   const handleManualLaunch = async () => {
     const ok = await tryLaunchHydra();
+    setIsRunning(ok);
     if (!ok) toaster.toast({ title: "Hydra", body: "Could not find Hydra executable" });
   };
 
@@ -161,13 +163,30 @@ export function Home() {
 
       <PanelSection title="Playing now">{playingNowContent}</PanelSection>
 
-      {showLaunchButton && (
-        <PanelSection title="Hydra">
-          <ButtonItem disabled={launchState !== "idle"} onClick={handleManualLaunch}>
-            {launchButtonLabel}
-          </ButtonItem>
-        </PanelSection>
-      )}
+      <PanelSection title="Hydra">
+        <PanelSectionRow>
+          <div className="home__hydra-status">
+            <span
+              className={`home__hydra-status-dot home__hydra-status-dot--${
+                isRunning === null ? "unknown" : isRunning ? "on" : "off"
+              }`}
+            />
+            {isRunning === null
+              ? "Checking Hydra status…"
+              : isRunning
+                ? "Hydra Launcher is running"
+                : "Hydra Launcher is not running"}
+          </div>
+        </PanelSectionRow>
+
+        {isRunning === false && (
+          <PanelSectionRow>
+            <ButtonItem disabled={launchState !== "idle"} onClick={handleManualLaunch}>
+              {launchButtonLabel}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
 
       <DownloadsSection />
 

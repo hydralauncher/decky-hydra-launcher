@@ -145,6 +145,8 @@ def set_settings(ini_path: str, user_name: str, language: str):
             missing_lines.append(f"{LANGUAGE_KEY}{language}\n")
         if missing_lines:
             insert_at = settings_insert_at if settings_insert_at is not None else len(updated_lines)
+            if insert_at > 0 and not updated_lines[insert_at - 1].endswith("\n"):
+                updated_lines[insert_at - 1] += "\n"
             updated_lines[insert_at:insert_at] = missing_lines
 
         with open(ini_path, "w", encoding="utf-8") as f:

@@ -128,15 +128,45 @@ class Plugin:
             decky.logger.error(f"[Hydra] launch_hydra_background unexpected error: {e}")
             return {"success": False, "error": str(e)}
 
+    def _read_gamescope_environment(self, runtime_dir: str):
+        """SteamOS's gamescope (Gaming Mode) session writes its own
+        recommended environment for external apps to $XDG_RUNTIME_DIR/
+        gamescope-environment. It uses plain X11 (DISPLAY=:0, no
+        Xauthority needed) rather than Wayland, so this is the
+        authoritative source instead of guessing a socket name."""
+        env_path = os.path.join(runtime_dir, "gamescope-environment")
+        if not os.path.isfile(env_path):
+            return {}
+
+        wanted_keys = ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+        overrides = {}
+        try:
+            with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    key, _, value = line.strip().partition("=")
+                    if key in wanted_keys and value:
+                        overrides[key] = value
+        except Exception as e:
+            decky.logger.error(f"[Hydra] Failed to read {env_path}: {e}")
+            return {}
+
+        return overrides
+
     def _discover_display_env(self):
-        """Find the desktop session's real Wayland socket (or, failing that,
-        its X11 Xauthority cookie). plugin_loader.service runs with no display
-        env at all, so blindly forcing DISPLAY=:0 fails with "Authorization
-        required, but no authorization protocol specified"."""
+        """Find the desktop session's real display environment.
+        plugin_loader.service runs with no display env at all, so blindly
+        forcing DISPLAY=:0 fails with "Authorization required, but no
+        authorization protocol specified"."""
         runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
         if not os.path.isdir(runtime_dir):
             return {}
 
+        gamescope_env = self._read_gamescope_environment(runtime_dir)
+        if gamescope_env:
+            return gamescope_env
+
+        # Not a gamescope session — fall back to locating the desktop's own
+        # Wayland socket (or, failing that, its X11 Xauthority cookie)
         overrides = {"XDG_RUNTIME_DIR": runtime_dir}
 
         # Needed for the system tray icon to register with the desktop —
@@ -162,7 +192,30 @@ class Plugin:
                 overrides["DISPLAY"] = ":0"
                 return overrides
 
+        # Native X11 session (e.g. GNOME/KDE on Xorg instead of Wayland) —
+        # find the real socket instead of guessing ":0"
+        display = self._find_x11_display()
+        if display:
+            overrides["DISPLAY"] = display
+            xauthority = os.environ.get("XAUTHORITY") or os.path.expanduser("~/.Xauthority")
+            if os.path.isfile(xauthority):
+                overrides["XAUTHORITY"] = xauthority
+            return overrides
+
         return overrides
+
+    def _find_x11_display(self):
+        x11_dir = "/tmp/.X11-unix"
+        if not os.path.isdir(x11_dir):
+            return None
+        try:
+            entries = sorted(os.listdir(x11_dir))
+        except OSError:
+            return None
+        for entry in entries:
+            if entry.startswith("X") and entry[1:].isdigit():
+                return f":{entry[1:]}"
+        return None
 
     def _start_hydra(self, executable: str):
         import time
@@ -179,8 +232,11 @@ class Plugin:
                 if old:
                     decky.logger.info(f"[Hydra] Stripped {var}={old}")
 
-            # Ensure a display is set — Gamescope/Plasma use Wayland
-            args = [executable, "--hidden"]
+            # Ensure a display is set — Gamescope/Plasma use Wayland. Chromium's
+            # own sandbox setup is unreliable when launched outside a real
+            # interactive session (e.g. from this systemd-managed plugin), so
+            # skip it — there's no untrusted content to sandbox here anyway
+            args = [executable, "--hidden", "--no-sandbox"]
             if not env.get("DISPLAY") and not env.get("WAYLAND_DISPLAY"):
                 discovered = self._discover_display_env()
                 if discovered:
@@ -334,9 +390,14 @@ class Plugin:
         subprocess.run([BACKEND_PATH, "toggle-automatic-cloud-sync", shop, object_id, str(automatic_cloud_sync).lower()], capture_output=True, text=True, check=True)
 
     async def is_hydra_launcher_running(self):
-        temp_dir = tempfile.gettempdir()
-        lockfile = f"{temp_dir}/hydra-launcher.lock"
-        return os.path.exists(lockfile)
+        # Hydra Launcher doesn't reliably create the lockfile, so check for
+        # the actual process instead
+        try:
+            result = subprocess.run(["pgrep", "-f", "hydralauncher"], capture_output=True, timeout=5)
+            return result.returncode == 0
+        except Exception as e:
+            decky.logger.error(f"[Hydra] is_hydra_launcher_running error: {e}")
+            return False
 
     async def get_steam_emu_ini_settings(self, executable_path: str | None, title: str):
         return steam_emu.get_settings(executable_path, title)

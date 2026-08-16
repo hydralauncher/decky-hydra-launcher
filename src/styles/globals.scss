@@ -4,6 +4,34 @@
   }
 }
 
+.home {
+  &__hydra-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+  }
+
+  &__hydra-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+
+    &--on {
+      background-color: #4caf50;
+    }
+
+    &--off {
+      background-color: #e15554;
+    }
+
+    &--unknown {
+      background-color: rgba(255, 255, 255, 0.3);
+    }
+  }
+}
+
 .game-cover {
   display: flex;
   justify-content: center;

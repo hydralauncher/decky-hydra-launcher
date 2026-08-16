@@ -57,3 +57,6 @@ cli/*
 cli/decky
 
 backend/target
+
+# Ignore local package.sh zips
+packages/
