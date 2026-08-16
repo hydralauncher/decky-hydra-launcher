@@ -34,6 +34,35 @@ export interface Game {
   shop: "steam";
   winePrefixPath: string | null;
   automaticCloudSync: boolean;
+  executablePath: string | null;
+}
+
+export interface SteamEmuIniSettings {
+  iniPath: string;
+  userName: string;
+  language: string;
+}
+
+export type DownloadStatus =
+  | "active"
+  | "waiting"
+  | "paused"
+  | "error"
+  | "complete"
+  | "seeding"
+  | "extracting";
+
+export interface Download {
+  shop: string;
+  objectId: string;
+  folderName: string | null;
+  progress: number;
+  bytesDownloaded: number;
+  fileSize: number | null;
+  status: DownloadStatus | null;
+  extracting: boolean;
+  extractionProgress: number;
+  queued: boolean;
 }
 
 export interface User {

@@ -55,6 +55,7 @@ struct Game {
     icon_url: Option<String>,
     wine_prefix_path: Option<String>,
     automatic_cloud_sync: Option<bool>,
+    executable_path: Option<String>,
 }
 
 fn get_leveldb_snapshot() -> Snapshot {
@@ -81,6 +82,66 @@ fn get_leveldb_snapshot() -> Snapshot {
     }
 }
 
+pub fn update_game_steam_shortcut(shop: &str, object_id: &str, steam_shortcut_app_id: u32) -> Result<(), String> {
+    let db_path = dirs::config_dir()
+        .unwrap()
+        .join("hydralauncher")
+        .join("hydra-db");
+
+    let key = format!("!games!{}:{}", shop, object_id);
+
+    let mut db = DB::open(&db_path, Options::default())
+        .map_err(|e| format!("Failed to open LevelDB: {}", e))?;
+
+    let value = db.get(key.as_bytes())
+        .ok_or_else(|| format!("Game not found: {}", key))?;
+
+    let mut game: serde_json::Value = serde_json::from_slice(&value)
+        .map_err(|e| format!("Failed to parse game: {}", e))?;
+
+    game["steamShortcutAppId"] = serde_json::json!(steam_shortcut_app_id);
+
+    // Only set winePrefixPath if the game doesn't already have one
+    if game["winePrefixPath"].is_null() {
+        let home = dirs::home_dir().unwrap();
+        let wine_prefix = home
+            .join(".local/share/Steam/steamapps/compatdata")
+            .join(steam_shortcut_app_id.to_string())
+            .join("pfx");
+        game["winePrefixPath"] = serde_json::json!(wine_prefix.to_str().unwrap());
+    }
+
+    let updated = serde_json::to_vec(&game)
+        .map_err(|e| format!("Failed to serialize game: {}", e))?;
+
+    db.put(key.as_bytes(), &updated)
+        .map_err(|e| format!("Failed to write game: {}", e))?;
+
+    db.close().map_err(|e| format!("Failed to close LevelDB: {}", e))?;
+
+    Ok(())
+}
+
+pub fn delete_download(shop: &str, object_id: &str) -> Result<(), String> {
+    let db_path = dirs::config_dir()
+        .unwrap()
+        .join("hydralauncher")
+        .join("hydra-db");
+
+    // abstract-level sublevel key format: !<sublevel>!<key>
+    let key = format!("!downloads!{}:{}", shop, object_id);
+
+    let mut db = DB::open(&db_path, Options::default())
+        .map_err(|e| format!("Failed to open LevelDB: {}", e))?;
+
+    db.delete(key.as_bytes())
+        .map_err(|e| format!("Failed to delete key: {}", e))?;
+
+    db.close().map_err(|e| format!("Failed to close LevelDB: {}", e))?;
+
+    Ok(())
+}
+
 pub fn get_auth() -> String {
     let mut snapshot = get_leveldb_snapshot();
 
@@ -92,6 +153,43 @@ pub fn get_auth() -> String {
     snapshot.db.close().unwrap();
 
     auth
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Download {
+    pub shop: String,
+    pub object_id: String,
+    pub folder_name: Option<String>,
+    pub progress: f64,
+    pub bytes_downloaded: f64,
+    pub file_size: Option<f64>,
+    pub status: Option<String>,
+    pub extracting: bool,
+    pub extraction_progress: f64,
+    pub queued: bool,
+}
+
+pub fn get_downloads() -> String {
+    let mut snapshot = get_leveldb_snapshot();
+    let mut iter = snapshot.db.new_iter().unwrap();
+    let mut downloads = Vec::new();
+
+    while let Some((key_bytes, value_bytes)) = iter.next() {
+        let key = String::from_utf8(key_bytes).unwrap();
+        if key.starts_with("!downloads") {
+            let raw = String::from_utf8(value_bytes).unwrap();
+            if let Ok(download) = serde_json::from_str::<Download>(&raw) {
+                let status = download.status.as_deref();
+                if !matches!(status, Some("removed")) {
+                    downloads.push(download);
+                }
+            }
+        }
+    }
+
+    snapshot.db.close().unwrap();
+    serde_json::to_string(&downloads).unwrap()
 }
 
 pub fn get_library() -> String {
@@ -264,6 +362,36 @@ fn restore_ludusavi_backup(
             fs::rename(source_path, destination_path)?;
         }
     }
+
+    Ok(())
+}
+
+pub fn toggle_automatic_cloud_sync(shop: &str, object_id: &str, automatic_cloud_sync: bool) -> Result<(), String> {
+    let db_path = dirs::config_dir()
+        .unwrap()
+        .join("hydralauncher")
+        .join("hydra-db");
+
+    let key = format!("!games!{}:{}", shop, object_id);
+
+    let mut db = DB::open(&db_path, Options::default())
+        .map_err(|e| format!("Failed to open DB: {:?}", e))?;
+
+    let value = db.get(key.as_bytes())
+        .ok_or_else(|| format!("Game not found: {}", key))?;
+
+    let mut game: serde_json::Value = serde_json::from_slice(&value)
+        .map_err(|e| format!("Failed to parse game: {:?}", e))?;
+
+    game["automaticCloudSync"] = serde_json::json!(automatic_cloud_sync);
+
+    let updated = serde_json::to_vec(&game)
+        .map_err(|e| format!("Failed to serialize game: {:?}", e))?;
+
+    db.put(key.as_bytes(), &updated)
+        .map_err(|e| format!("Failed to write to DB: {:?}", e))?;
+
+    db.close().map_err(|e| format!("Failed to close DB: {:?}", e))?;
 
     Ok(())
 }

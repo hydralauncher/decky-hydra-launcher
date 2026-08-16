@@ -14,7 +14,7 @@ import { api } from "./hydra-api";
 import { Home } from "./home";
 import { WSClient } from "./ws";
 import { composeToastLogo } from "./helpers";
-import { GameCloudSaves } from "./game-cloud-saves";
+import { GamePage } from "./game-page";
 import { AuthGuide } from "./auth-guide";
 import { backupAndUpload, getLibrary, isHydraLauncherRunning } from "./events";
 import { getAuth } from "./events";
@@ -45,7 +45,7 @@ function Plugin() {
       case "auth-guide":
         return <AuthGuide />;
       case "game":
-        return <GameCloudSaves game={route.params.game as Game} />;
+        return <GamePage game={route.params.game as Game} />;
       case "home":
         return <Home />;
       default:
