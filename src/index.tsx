@@ -16,10 +16,8 @@ import { WSClient } from "./ws";
 import { composeToastLogo } from "./helpers";
 import { GameCloudSaves } from "./game-cloud-saves";
 import { AuthGuide } from "./auth-guide";
-import { backupAndUpload, getLibrary, isHydraLauncherRunning } from "./events";
-import { getAuth } from "./events";
+import { getAuth, getLibrary, isHydraLauncherRunning, syncCloudSave } from "./events";
 import { HydraLogo } from "./components";
-import { formatDate } from "./hooks";
 import type { Game, User } from "./api-types";
 
 function Plugin() {
@@ -143,25 +141,36 @@ const onAppLifetimeNotification = async (
 
     const isHydraRunning = await isHydraLauncherRunning();
 
-    // Check if there's any chance for the accessToken to be expired
     if (
       game.automaticCloudSync &&
       auth &&
       hasActiveSubscription &&
       !isHydraRunning
     ) {
-      await backupAndUpload(
-        game.objectId,
-        game.winePrefixPath,
-        auth.accessToken,
-        `Automatic Decky Backup from ${formatDate(new Date(), "en")}`
-      );
+      try {
+        const result = await syncCloudSave(
+          auth,
+          game.objectId,
+          game.winePrefixPath
+        );
 
-      toaster.toast({
-        title: "Backup and upload successful",
-        body: "The game has been backed up and uploaded to the cloud",
-        logo: composeToastLogo(game.iconUrl),
-      });
+        if (result.auth) {
+          useAuthStore.getState().setAuth(result.auth);
+        }
+
+        toaster.toast({
+          title: "Cloud save synced",
+          body: "The game save has been uploaded to the cloud",
+          logo: composeToastLogo(game.iconUrl),
+        });
+      } catch (error: unknown) {
+        console.error("Failed to sync cloud save", error);
+
+        toaster.toast({
+          title: "Failed to sync cloud save",
+          body: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
     }
   }
 };

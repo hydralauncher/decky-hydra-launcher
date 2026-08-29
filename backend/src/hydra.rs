@@ -1,19 +1,14 @@
 use rusty_leveldb::{DB, LdbIterator, Options};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
-use anyhow::{Context, Result};
 use std::fs;
 use std::fs::File;
 use std::path::PathBuf;
-use uuid::Uuid;
-use tar::{Builder, Archive};
-use tokio::fs as tokio_fs;
+use tar::Archive;
 use std::io::Write;
 use reqwest::Client;
-use serde_json::json;
 use std::collections::HashMap;
 
-use crate::ludusavi::backup_game;
 use crate::wine::{add_wine_prefix_to_windows_path, get_windows_like_user_profile_path, transform_ludusavi_backup_path_into_windows_path};
 
 struct Snapshot {
@@ -34,12 +29,6 @@ pub struct LudusaviBackup {
 
 #[derive(Debug, Deserialize)]
 pub struct FileMetadata {
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UploadResponse {
-    upload_url: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -111,103 +100,6 @@ pub fn get_library() -> String {
     snapshot.db.close().unwrap();
 
     serde_json::to_string(&library).unwrap()
-}
-
-async fn bundle_backup(
-    shop: &str,
-    object_id: &str,
-    wine_prefix: Option<&str>,
-) -> Result<PathBuf> {
-    let backups_path = dirs::config_dir()
-        .unwrap()
-        .join("hydralauncher")
-        .join("Backups");
-
-    let backup_path = backups_path.join(format!("{shop}-{object_id}"));
-
-    // Remove existing backup
-    if backup_path.exists() {
-        tokio_fs::remove_dir_all(&backup_path)
-            .await
-            .context("Failed to remove backup path")?;
-    }
-
-    let _ = backup_game(
-        object_id,
-        Some(backup_path.to_str().unwrap()),
-        wine_prefix,
-        false,
-    )
-    .await;
-
-    let tar_location = backups_path.join(format!("{}.tar", Uuid::new_v4()));
-    let tar_file = File::create(&tar_location).context("Failed to create tar file")?;
-    let mut tar_builder = Builder::new(tar_file);
-
-    tar_builder
-        .append_dir_all(".", &backup_path)
-        .context("Failed to write tar contents")?;
-
-    tar_builder.finish().context("Failed to finish tar archive")?;
-
-    Ok(tar_location)
-}
-
-pub async fn upload_save_game(
-    object_id: &str,
-    shop: &str,
-    wine_prefix_path: Option<&str>,
-    access_token: &str,
-    label: &str,
-) -> Result<()> {
-    let bundle_location = bundle_backup(shop, object_id, wine_prefix_path).await?;
-
-    let stat = tokio_fs::metadata(&bundle_location).await?;
-    let size = stat.len();
-
-    let wine_prefix_real = match wine_prefix_path.clone() {
-        Some(path) => Some(fs::canonicalize(path)?),
-        None => None,
-    };
-
-    let home_dir = get_windows_like_user_profile_path(wine_prefix_path.unwrap_or("")).unwrap();
-
-    let client = Client::new();
-    let response = client
-        .post("https://hydra-api-us-east-1.losbroxas.org/profile/games/artifacts")
-        .bearer_auth(&access_token)
-        .json(&json!({
-            "artifactLengthInBytes": size,
-            "shop": shop,
-            "objectId": object_id,
-            "hostname": hostname::get()?.to_string_lossy(),
-            "winePrefixPath": wine_prefix_real,
-            "homeDir": home_dir,
-            "downloadOptionTitle": serde_json::Value::Null,
-            "platform": std::env::consts::OS,
-            "label": label,
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<UploadResponse>()
-        .await?;
-
-    let file_bytes = tokio_fs::read(&bundle_location).await?;
-
-    client
-        .put(&response.upload_url)
-        .header("Content-Type", "application/tar")
-        .body(file_bytes)
-        .send()
-        .await?
-        .error_for_status()?;
-
-    if let Err(err) = tokio_fs::remove_file(&bundle_location).await {
-        eprintln!("Failed to remove tar file: {:?}", err);
-    }
-
-    Ok(())
 }
 
 fn restore_ludusavi_backup(

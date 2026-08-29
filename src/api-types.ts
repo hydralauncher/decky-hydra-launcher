@@ -9,6 +9,36 @@ export interface GameArtifact {
   label?: string;
 }
 
+export interface CloudSaveSnapshotSummary {
+  id: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  fileCount: number;
+  totalSizeBytes: number;
+  aggregateHash: string;
+}
+
+export interface CloudSaveSyncResult {
+  ok: boolean;
+  snapshotId: string;
+  version: number;
+  fileCount: number;
+  totalSizeBytes: number;
+  uploadedFiles: number;
+  skippedFiles: number;
+  auth?: Auth;
+}
+
+export interface CloudSaveRestoreResult {
+  ok: boolean;
+  snapshotId: string;
+  version: number;
+  restoredFiles: number;
+  skippedFiles: string[];
+  auth?: Auth;
+}
+
 export interface Auth {
   accessToken: string;
   refreshToken: string;

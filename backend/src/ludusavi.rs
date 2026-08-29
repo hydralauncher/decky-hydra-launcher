@@ -1,17 +1,62 @@
 use std::process::Command;
 use std::path::PathBuf;
 
-fn get_ludusavi_path() -> PathBuf {
+const LUDUSAVI_CONFIG: &str = r#"manifest:
+  enable: false
+  secondary:
+    - url: https://cdn.losbroxas.org/manifest.yaml
+      enable: true
+customGames: []
+"#;
+
+/// Ludusavi working directory (config + manifest cache). Kept separate from
+/// the desktop launcher's directory so the pinned manifest config is enforced.
+fn get_ludusavi_config_path() -> PathBuf {
     dirs::config_dir()
         .unwrap()
         .join("hydralauncher")
+        .join("decky-ludusavi")
+}
+
+/// Resolve the ludusavi binary: prefer the copy bundled with the plugin
+/// (next to the backend binary), fall back to the desktop launcher's copy.
+fn get_ludusavi_binary_path() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundled = dir.join("ludusavi");
+            if bundled.exists() {
+                return Some(bundled);
+            }
+        }
+    }
+
+    let desktop_copy = dirs::config_dir()
+        .unwrap()
+        .join("hydralauncher")
         .join("ludusavi")
+        .join("ludusavi");
+    if desktop_copy.exists() {
+        return Some(desktop_copy);
+    }
+
+    None
 }
 
 pub fn check_if_ludusavi_binary_exists() -> bool {
-    let ludusavi_path = get_ludusavi_path();
-    let ludusavi_binary_path = ludusavi_path.join("ludusavi");
-    ludusavi_binary_path.exists()
+    get_ludusavi_binary_path().is_some()
+}
+
+fn ensure_ludusavi_config() -> Result<PathBuf, String> {
+    let config_path = get_ludusavi_config_path();
+    std::fs::create_dir_all(&config_path)
+        .map_err(|e| format!("Failed to create ludusavi config dir: {e}"))?;
+
+    // Always (re)write so the pinned manifest source is enforced.
+    let config_file = config_path.join("config.yaml");
+    std::fs::write(&config_file, LUDUSAVI_CONFIG)
+        .map_err(|e| format!("Failed to write ludusavi config: {e}"))?;
+
+    Ok(config_path)
 }
 
 pub async fn backup_game(
@@ -20,8 +65,9 @@ pub async fn backup_game(
     wine_prefix: Option<&str>,
     preview: bool,
 ) -> Result<String, String> {
-    let ludusavi_path = get_ludusavi_path();
-    let ludusavi_binary_path = ludusavi_path.join("ludusavi");
+    let ludusavi_binary_path = get_ludusavi_binary_path()
+        .ok_or_else(|| "Ludusavi binary not found".to_string())?;
+    let ludusavi_path = ensure_ludusavi_config()?;
 
     let mut args = vec![
         "--config".into(),

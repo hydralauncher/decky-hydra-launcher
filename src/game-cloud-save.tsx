@@ -22,6 +22,14 @@ export function GameCloudSave({
   const { formatDate, formatDateTime } = useDate();
 
   const downloadArtifact = useCallback(async () => {
+    if (!game.winePrefixPath) {
+      toaster.toast({
+        title: "Cannot restore backup",
+        body: "This game has no Wine prefix configured",
+      });
+      return;
+    }
+
     toaster.toast({
       title: "Downloading backup...",
       body: "Please wait while we download the backup",
@@ -42,7 +50,7 @@ export function GameCloudSave({
         response.downloadUrl,
         response.objectKey,
         response.homeDir,
-        game.winePrefixPath!,
+        game.winePrefixPath,
         response.winePrefixPath
       );
 
