@@ -492,10 +492,14 @@ async fn discover_files(
             }
 
             let real_path = PathBuf::from(path);
-            let metadata = match tokio_fs::metadata(&real_path).await {
-                Ok(metadata) => metadata,
-                Err(_) => continue, // vanished between scan and read
-            };
+            // A file ludusavi listed but that can no longer be read must not
+            // be silently dropped: committing without it would delete the save
+            // from other devices on restore. Fail in the retryable mutation
+            // class so discovery re-runs; if it still fails, the sync aborts
+            // without committing a partial snapshot.
+            let metadata = tokio_fs::metadata(&real_path).await.map_err(|_| {
+                anyhow!("Save file changed during sync; aborting before commit")
+            })?;
             if !metadata.is_file() {
                 continue;
             }
@@ -521,11 +525,9 @@ async fn discover_files(
                 _ => ("<root>".to_string(), tokenized.clone()),
             };
 
-            // Vanished between scan and hash: skip; the next sync picks it up.
-            let hash = match sha256_file_hex(&real_path).await {
-                Ok(hash) => hash,
-                Err(_) => continue,
-            };
+            let hash = sha256_file_hex(&real_path).await.map_err(|_| {
+                anyhow!("Save file changed during sync; aborting before commit")
+            })?;
 
             files.push(DiscoveredFile {
                 entry: SnapshotFileEntry {
@@ -597,7 +599,19 @@ pub async fn sync_cloud_save(
     let mut result: Option<(CommitSnapshotResponse, usize, usize)> = None;
 
     for attempt in 0..2 {
-        let discovered = discover_files(object_id, wine_prefix, &variant.variant_id).await?;
+        let discovered = match discover_files(object_id, wine_prefix, &variant.variant_id).await {
+            Ok(discovered) => discovered,
+            Err(err) => {
+                let retryable = err
+                    .chain()
+                    .any(|cause| cause.to_string().contains("changed during sync"));
+                if attempt == 0 && retryable {
+                    last_error = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        };
         let files: Vec<SnapshotFileEntry> = discovered.iter().map(|f| f.entry.clone()).collect();
 
         let total_size: u64 = files.iter().map(|f| f.size_bytes).sum();
