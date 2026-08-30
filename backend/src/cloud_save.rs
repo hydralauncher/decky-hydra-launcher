@@ -501,7 +501,9 @@ async fn discover_files(
                 anyhow!("Save file changed during sync; aborting before commit")
             })?;
             if !metadata.is_file() {
-                continue;
+                return Err(anyhow!(
+                    "Save file changed during sync; aborting before commit"
+                ));
             }
 
             let size_bytes = metadata.len();
@@ -881,6 +883,20 @@ async fn prepare_upload_commit(
 
     while let Some(result) = join_set.join_next().await {
         result.context("Upload task panicked")??;
+    }
+
+    // Re-hash every proposed file before commit — including ones the server
+    // marked "skip". A file that changed since discovery would otherwise be
+    // committed with a stale identity while the local change stays unpreserved.
+    for source in discovered {
+        let actual_hash = sha256_file_hex(&source.source_path).await.map_err(|_| {
+            anyhow!("Save file changed during sync; aborting before commit")
+        })?;
+        if actual_hash != source.entry.hash {
+            return Err(anyhow!(
+                "Save file changed during sync; aborting before commit"
+            ));
+        }
     }
 
     // Commit, retrying once on transport failure.

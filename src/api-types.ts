@@ -64,6 +64,7 @@ export interface Game {
   shop: "steam";
   winePrefixPath: string | null;
   automaticCloudSync: boolean;
+  isDeleted?: boolean;
 }
 
 export interface User {
