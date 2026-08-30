@@ -232,12 +232,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
           className="cloud-save"
           onClick={confirmRestore}
           disabled={
-            isGameRunning ||
-            !canSync ||
-            !snapshot ||
-            !game.winePrefixPath ||
-            isSyncing ||
-            isRestoring
+            isGameRunning || !canSync || !snapshot || isSyncing || isRestoring
           }
         >
           {isRestoring ? (

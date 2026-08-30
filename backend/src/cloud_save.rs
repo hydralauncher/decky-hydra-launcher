@@ -753,7 +753,9 @@ async fn prepare_upload_commit(
         .collect();
 
     // Group uploads by blob identity so identical content uploads once.
-    let mut upload_jobs: HashMap<String, (String, String, PathBuf, usize)> = HashMap::new();
+    // Each job: (upload_url, checksum_header, source_path, size, expected_hash).
+    let mut upload_jobs: HashMap<String, (String, String, PathBuf, usize, String)> =
+        HashMap::new();
     let mut skipped_files = 0usize;
 
     for file in &response.files {
@@ -807,12 +809,14 @@ async fn prepare_upload_commit(
                     expected_checksum,
                     source.source_path.clone(),
                     proposal.size_bytes as usize,
+                    proposal.hash.clone(),
                 )
             });
     }
 
     // Upload blobs with bounded concurrency.
-    let jobs: Vec<(String, String, PathBuf, usize)> = upload_jobs.into_values().collect();
+    let jobs: Vec<(String, String, PathBuf, usize, String)> =
+        upload_jobs.into_values().collect();
     let uploaded_files = response
         .files
         .iter()
@@ -821,7 +825,7 @@ async fn prepare_upload_commit(
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
     let mut join_set = tokio::task::JoinSet::new();
 
-    for (url, checksum, path, size) in jobs {
+    for (url, checksum, path, size, expected_hash) in jobs {
         let permit = semaphore.clone().acquire_owned().await?;
         let upload_client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
@@ -829,6 +833,16 @@ async fn prepare_upload_commit(
         join_set.spawn(async move {
             let _permit = permit;
             let body = tokio_fs::read(&path).await?;
+
+            // Re-hash at upload time: the file may have changed since
+            // discovery, and the committed snapshot must match these bytes.
+            let actual_hash = format!("{:x}", Sha256::digest(&body));
+            if actual_hash != expected_hash {
+                return Err(anyhow!(
+                    "Save file changed during sync; aborting before commit"
+                ));
+            }
+
             let resp = upload_client
                 .put(&url)
                 .header("Content-Length", size.to_string())
