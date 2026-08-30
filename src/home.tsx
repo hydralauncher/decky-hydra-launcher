@@ -107,7 +107,9 @@ export function Home() {
       <PanelSection title="Playable on the Deck">
         <div className="library-games">
           {library
-            .filter((game) => game.winePrefixPath)
+            // Wine-prefix games are playable on the Deck; prefix-less native
+            // games show up when cloud sync is enabled for them.
+            .filter((game) => game.winePrefixPath || game.automaticCloudSync)
             .map((game) => (
               <PanelSectionRow>
                 <Button
