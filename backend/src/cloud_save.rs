@@ -521,7 +521,11 @@ async fn discover_files(
                 _ => ("<root>".to_string(), tokenized.clone()),
             };
 
-            let hash = sha256_file_hex(&real_path).await?;
+            // Vanished between scan and hash: skip; the next sync picks it up.
+            let hash = match sha256_file_hex(&real_path).await {
+                Ok(hash) => hash,
+                Err(_) => continue,
+            };
 
             files.push(DiscoveredFile {
                 entry: SnapshotFileEntry {
@@ -829,7 +833,12 @@ async fn prepare_upload_commit(
             .build()?;
         join_set.spawn(async move {
             let _permit = permit;
-            let body = tokio_fs::read(&path).await?;
+            // A file deleted or locked between discovery and upload is a
+            // mutation: surface it in the retryable class so the sync
+            // re-discovers from scratch.
+            let body = tokio_fs::read(&path).await.map_err(|_| {
+                anyhow!("Save file changed during sync; aborting before commit")
+            })?;
 
             // Re-hash at upload time: the file may have changed since
             // discovery, and the committed snapshot must match these bytes.
