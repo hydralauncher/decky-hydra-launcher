@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 echo "--- Rust version info ---"
 rustup --version
