@@ -169,6 +169,27 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     );
   }, [restore]);
 
+  const confirmSync = useCallback(() => {
+    const flagged = useCloudSaveGuard
+      .getState()
+      .remoteNewerGames.includes(game.objectId);
+
+    if (!flagged) {
+      syncNow();
+      return;
+    }
+
+    showModal(
+      <ConfirmModal
+        strTitle="Overwrite Newer Cloud Save?"
+        strDescription="A newer cloud save exists for this game. Syncing now will overwrite it with your local save."
+        strOKButtonText="Sync Anyway"
+        strCancelButtonText="Cancel"
+        onOK={syncNow}
+      />
+    );
+  }, [syncNow, game.objectId]);
+
   return (
     <PanelSection title="Cloud Saves">
       <div className="game-cloud-saves__header">
@@ -214,7 +235,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       <div className="game-cloud-saves__cloud-saves">
         <Button
           className="game-cloud-saves__new-backup"
-          onClick={syncNow}
+          onClick={confirmSync}
           disabled={isGameRunning || !canSync || isSyncing || isRestoring}
         >
           {isSyncing ? (

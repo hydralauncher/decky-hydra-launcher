@@ -12,7 +12,8 @@ use crate::wine::get_windows_like_user_profile_path;
 pub const API_BASE: &str = "https://hydra-api-us-east-1.losbroxas.org";
 
 const MAX_SNAPSHOT_FILES: usize = 500;
-const MAX_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+// Matches the launcher's upload-limits.ts exactly.
+const MAX_SNAPSHOT_BYTES: u64 = 2_147_483_647;
 const MAX_CONCURRENT_TRANSFERS: usize = 8;
 
 // ---------------------------------------------------------------------------
@@ -255,6 +256,14 @@ fn write_state(shop: &str, object_id: &str, state: &CloudSaveState) -> Result<()
     Ok(())
 }
 
+/// State is a best-effort local record; losing it must not fail an operation
+/// whose remote side already succeeded.
+fn write_state_logged(shop: &str, object_id: &str, state: &CloudSaveState) {
+    if let Err(err) = write_state(shop, object_id, state) {
+        eprintln!("Failed to persist cloud save state: {err:#}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // API types
 // ---------------------------------------------------------------------------
@@ -383,6 +392,7 @@ fn hydra_client(auth: &Auth) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .default_headers(headers)
         .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(1800))
         .build()?)
 }
 
@@ -450,8 +460,11 @@ fn tokenize_windows_path(path: &str, user_profile: Option<&str>) -> String {
     let mut replacements: Vec<(String, String)> = Vec::new();
     if let Some(profile) = user_profile {
         let profile = profile.trim_end_matches('/');
+        // <winLocalAppDataLow> does not exist in the ludusavi manifest or the
+        // launcher; LocalLow rules are expressed as <home>/AppData/LocalLow
+        // where <home> is the Windows user profile.
+        replacements.push((format!("{profile}/AppData/LocalLow"), "<home>/AppData/LocalLow".into()));
         replacements.push((format!("{profile}/AppData/Roaming"), "<winAppData>".into()));
-        replacements.push((format!("{profile}/AppData/LocalLow"), "<winLocalAppDataLow>".into()));
         replacements.push((format!("{profile}/AppData/Local"), "<winLocalAppData>".into()));
         replacements.push((format!("{profile}/Documents"), "<winDocuments>".into()));
     }
@@ -487,22 +500,33 @@ async fn discover_files(
     let preview: LudusaviPreview =
         serde_json::from_str(&output).context("Invalid ludusavi preview output")?;
 
+    // Attribute files to exactly one game entry: prefer the one keyed by the
+    // queried id, fall back to a single match, refuse ambiguity.
+    let game = if let Some(game) = preview.games.get(object_id) {
+        game
+    } else if preview.games.len() == 1 {
+        preview.games.values().next().expect("one game")
+    } else if preview.games.is_empty() {
+        return Err(anyhow!("No save files found for this game"));
+    } else {
+        return Err(anyhow!(
+            "Ludusavi matched multiple games for this id; refusing to guess"
+        ));
+    };
+
     let user_profile = wine_prefix.and_then(|prefix| get_windows_like_user_profile_path(prefix).ok());
     let drive_c = wine_prefix.map(|prefix| format!("{}/drive_c", prefix.trim_end_matches('/')));
 
     let mut files = Vec::new();
-    for game in preview.games.values() {
-        for (path, info) in &game.files {
+    for (path, info) in &game.files {
             if info.ignored {
                 continue;
             }
 
             let real_path = PathBuf::from(path);
-            // A file ludusavi listed but that can no longer be read must not
-            // be silently dropped: committing without it would delete the save
-            // from other devices on restore. Fail in the retryable mutation
-            // class so discovery re-runs; if it still fails, the sync aborts
-            // without committing a partial snapshot.
+            // A listed file that can no longer be read must not be silently
+            // dropped: committing without it would delete the save on other
+            // devices. Fail retryable so discovery re-runs once.
             let metadata = tokio_fs::metadata(&real_path).await.map_err(|_| {
                 anyhow!("Save file changed during sync; aborting before commit")
             })?;
@@ -549,7 +573,6 @@ async fn discover_files(
                 },
                 source_path: real_path,
             });
-        }
     }
 
     if files.is_empty() {
@@ -590,8 +613,8 @@ pub async fn sync_cloud_save(
 ) -> Result<SyncResult> {
     let auth: Auth = serde_json::from_str(auth_json).context("Invalid auth payload")?;
     let base_client = reqwest::Client::new();
-    let auth = ensure_fresh_token(&base_client, &auth).await?;
-    let client = hydra_client(&auth)?;
+    let mut auth = ensure_fresh_token(&base_client, &auth).await?;
+    let mut client = hydra_client(&auth)?;
 
     let variant = build_default_variant(shop, object_id);
 
@@ -673,6 +696,13 @@ pub async fn sync_cloud_save(
                         || msg.contains("changed during sync")
                 });
                 if attempt == 0 && retryable {
+                    // The upload phase can outlive the access token; refresh
+                    // before the retry when the failure was auth-related.
+                    let msg = format!("{err:#}");
+                    if msg.contains("401") || msg.contains("403") {
+                        auth = ensure_fresh_token(&base_client, &auth).await?;
+                        client = hydra_client(&auth)?;
+                    }
                     last_error = Some(err);
                     continue;
                 }
@@ -684,7 +714,7 @@ pub async fn sync_cloud_save(
     let (committed, uploaded_files, skipped_files) =
         result.ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("Commit did not complete")))?;
 
-    write_state(
+    write_state_logged(
         shop,
         object_id,
         &CloudSaveState {
@@ -694,7 +724,7 @@ pub async fn sync_cloud_save(
             wine_prefix_path: wine_prefix.map(|p| p.to_string()),
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         },
-    )?;
+    );
 
     Ok(SyncResult {
         ok: true,
@@ -775,8 +805,6 @@ async fn prepare_upload_commit(
         .map(|f| (format!("{}\u{0}{}", f.entry.hash, f.entry.size_bytes), f))
         .collect();
 
-    // Group uploads by blob identity so identical content uploads once.
-    // Each job: (upload_url, checksum_header, source_path, size, expected_hash).
     let mut upload_jobs: HashMap<String, (String, String, PathBuf, usize, String)> =
         HashMap::new();
     let mut skipped_files = 0usize;
@@ -837,7 +865,6 @@ async fn prepare_upload_commit(
             });
     }
 
-    // Upload blobs with bounded concurrency.
     let jobs: Vec<(String, String, PathBuf, usize, String)> =
         upload_jobs.into_values().collect();
     let uploaded_files = response
@@ -852,6 +879,7 @@ async fn prepare_upload_commit(
         let permit = semaphore.clone().acquire_owned().await?;
         let upload_client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(1800))
             .build()?;
         join_set.spawn(async move {
             let _permit = permit;
@@ -905,7 +933,8 @@ async fn prepare_upload_commit(
         }
     }
 
-    // Commit, retrying once on transport failure.
+    // Commit, retrying once on transport failure (the reference client does
+    // the same to tolerate a dropped connection after the server committed).
     let mut committed: Option<CommitSnapshotResponse> = None;
     for attempt in 0..2 {
         let result = client
@@ -987,8 +1016,6 @@ impl RestoreContext {
 
         let base = if let Some(rest) = raw_path.strip_prefix("<winAppData>") {
             profile_root.map(|p| format!("{p}/AppData/Roaming{rest}"))
-        } else if let Some(rest) = raw_path.strip_prefix("<winLocalAppDataLow>") {
-            profile_root.map(|p| format!("{p}/AppData/LocalLow{rest}"))
         } else if let Some(rest) = raw_path.strip_prefix("<winLocalAppData>") {
             profile_root.map(|p| format!("{p}/AppData/Local{rest}"))
         } else if let Some(rest) = raw_path.strip_prefix("<winDocuments>") {
@@ -1002,16 +1029,38 @@ impl RestoreContext {
                 .as_ref()
                 .map(|p| format!("{p}/drive_c/ProgramData{rest}"))
         } else if let Some(rest) = raw_path.strip_prefix("<home>") {
+            // In manifest rules <home> means the Windows user profile when the
+            // path targets AppData; otherwise it is the Linux home directory.
+            if rest.starts_with("/AppData/") {
+                profile_root.map(|p| format!("{p}{rest}"))
+            } else {
+                self.home_dir
+                    .as_ref()
+                    .map(|p| format!("{}{rest}", p.to_string_lossy()))
+            }
+        } else if let Some(rest) = raw_path.strip_prefix("<xdgData>") {
             self.home_dir
                 .as_ref()
-                .map(|p| format!("{}{rest}", p.to_string_lossy()))
+                .map(|p| format!("{}/.local/share{rest}", p.to_string_lossy()))
+        } else if let Some(rest) = raw_path.strip_prefix("<xdgConfig>") {
+            self.home_dir
+                .as_ref()
+                .map(|p| format!("{}/.config{rest}", p.to_string_lossy()))
         } else if raw_path.contains("<storeUserId>") {
             // Resolve against the variant's concrete folder id when known.
             None
         } else if raw_path.starts_with("C:/") || raw_path.starts_with("c:/") {
             self.resolve_windows_path(&raw_path)
         } else if raw_path.starts_with('/') {
-            Some(raw_path.clone())
+            // Manifest data is server-supplied: confine absolute paths to the
+            // user's home directory so a hostile snapshot cannot write
+            // anywhere else on the system.
+            let home = self.home_dir.as_ref()?.to_string_lossy().to_string();
+            if raw_path == home || raw_path.starts_with(&format!("{home}/")) {
+                Some(raw_path.clone())
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1035,6 +1084,16 @@ impl RestoreContext {
     ) -> Option<PathBuf> {
         if raw_path.contains("<storeUserId>") {
             let concrete = self.variant_folders.get(variant_id)?;
+            // Server-supplied value: reject anything that could escape the
+            // target directory after substitution.
+            let safe = !concrete.is_empty()
+                && concrete.len() <= 255
+                && !concrete.contains(['/', '\\', '\0'])
+                && concrete != "."
+                && concrete != "..";
+            if !safe {
+                return None;
+            }
             let replaced = raw_path.replace("<storeUserId>", concrete);
             return self.resolve(&replaced, relative_path);
         }
@@ -1148,7 +1207,6 @@ pub async fn restore_cloud_save(
 
     let temp = tempfile::tempdir().context("Failed to create temp dir")?;
 
-    // Download blobs, deduplicated by content hash.
     let mut blob_urls: HashMap<String, (String, u64)> = HashMap::new();
     for file in &download_files {
         blob_urls
@@ -1160,6 +1218,7 @@ pub async fn restore_cloud_save(
     let mut join_set = tokio::task::JoinSet::new();
     let download_client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(1800))
         .build()?;
 
     for (hash, (url, _size)) in &blob_urls {
@@ -1248,17 +1307,26 @@ pub async fn restore_cloud_save(
             tokio_fs::create_dir_all(parent).await?;
         }
 
-        // Atomic replace: copy to a sibling temp file on the same filesystem,
-        // then rename over the target. A blob can be referenced by multiple
-        // manifest files, so the staged blob is never moved.
-        let temp_target = target.with_extension("hydra-restore-tmp");
-        tokio_fs::copy(&blob_path, &temp_target).await?;
+        // Atomic replace: copy to a unique sibling temp file on the same
+        // filesystem, then rename over the target. A blob can be referenced by
+        // multiple manifest files, so the staged blob is never moved.
+        let file_name = target
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "save".to_string());
+        let temp_target = target.with_file_name(format!(
+            ".{file_name}.hydra-restore-{}",
+            std::process::id()
+        ));
+        if let Err(err) = tokio_fs::copy(&blob_path, &temp_target).await {
+            let _ = tokio_fs::remove_file(&temp_target).await;
+            return Err(err).context("Failed to stage save file");
+        }
         if let Err(err) = tokio_fs::rename(&temp_target, &target).await {
             let _ = tokio_fs::remove_file(&temp_target).await;
             return Err(err).context("Failed to replace save file");
         }
 
-        // Restore mtime recorded in the manifest.
         if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&file.last_modified_at) {
             let mtime = filetime::FileTime::from_unix_time(parsed.timestamp(), 0);
             let _ = filetime::set_file_mtime(&target, mtime);
@@ -1267,7 +1335,7 @@ pub async fn restore_cloud_save(
         restored_files += 1;
     }
 
-    write_state(
+    write_state_logged(
         shop,
         object_id,
         &CloudSaveState {
@@ -1277,7 +1345,7 @@ pub async fn restore_cloud_save(
             wine_prefix_path: wine_prefix.map(|p| p.to_string()),
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         },
-    )?;
+    );
 
     Ok(RestoreResult {
         ok: true,

@@ -70,6 +70,11 @@ function Plugin() {
 let updateInterval: NodeJS.Timeout;
 let lastTick: Date;
 
+// Pre-launch status checks in flight, per objectId. The exit handler awaits
+// the pending check before syncing so a quick launch-then-exit cannot slip
+// past the guard.
+const pendingStatusChecks = new Map<string, Promise<void>>();
+
 const onAppLifetimeNotification = async (
   notification: AppLifetimeNotification
 ) => {
@@ -112,7 +117,7 @@ const onAppLifetimeNotification = async (
       // remote snapshot is newer we suppress this session's post-exit sync and
       // point the user at a manual restore instead.
       if (game.automaticCloudSync && auth && hasActiveSubscription) {
-        checkCloudSaveStatus(auth, game.objectId)
+        const check = checkCloudSaveStatus(auth, game.objectId)
           .then((status) => {
             if (status.auth) {
               useAuthStore.getState().setAuth(status.auth);
@@ -124,11 +129,22 @@ const onAppLifetimeNotification = async (
                 body: `${game.title} has a newer save in the cloud. This session will not sync — restore it from the Hydra plugin to keep the cloud version.`,
                 logo: composeToastLogo(game.iconUrl),
               });
+            } else {
+              useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
             }
           })
           .catch((err) => {
             console.error("Failed to check cloud save status", err);
+            toaster.toast({
+              title: "Cloud save status unknown",
+              body: `Could not check the cloud save for ${game.title}. Auto-sync stays enabled, but a newer cloud version may exist.`,
+            });
+          })
+          .finally(() => {
+            pendingStatusChecks.delete(game.objectId);
           });
+
+        pendingStatusChecks.set(game.objectId, check);
       }
 
       console.log("Started at", startedAt);
@@ -170,6 +186,9 @@ const onAppLifetimeNotification = async (
     }
 
     const isHydraRunning = await isHydraLauncherRunning();
+
+    // Never decide before the launch-time status check settles.
+    await pendingStatusChecks.get(game.objectId)?.catch(() => {});
 
     const remoteNewer = useCloudSaveGuard
       .getState()
