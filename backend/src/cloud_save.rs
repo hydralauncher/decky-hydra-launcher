@@ -580,37 +580,38 @@ pub async fn sync_cloud_save(
     let client = hydra_client(&auth)?;
 
     let variant = build_default_variant(shop, object_id);
-    let discovered = discover_files(object_id, wine_prefix, &variant.variant_id).await?;
-
-    let files: Vec<SnapshotFileEntry> = discovered.iter().map(|f| f.entry.clone()).collect();
-
-    let total_size: u64 = files.iter().map(|f| f.size_bytes).sum();
-    if files.len() > MAX_SNAPSHOT_FILES {
-        return Err(anyhow!(
-            "Too many save files ({} > {MAX_SNAPSHOT_FILES})",
-            files.len()
-        ));
-    }
-    if total_size > MAX_SNAPSHOT_BYTES {
-        return Err(anyhow!("Save files exceed 2 GiB limit"));
-    }
-
-    let aggregate_hash = build_aggregate_hash(std::slice::from_ref(&variant), &files)?;
-
-    let snapshots = list_snapshots(&client, shop, object_id).await?;
-    let base_version = snapshots.last().map(|s| s.version).unwrap_or(0);
 
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .ok()
         .filter(|h| !h.is_empty());
 
-    // Upload with one re-prepare retry on conflict / expired pending snapshot.
+    // Retry once on conflict / expired pending snapshot / files changing
+    // mid-sync. Discovery runs inside the loop so a retry re-scans and
+    // re-hashes the save files from scratch.
     let mut last_error: Option<anyhow::Error> = None;
-    let mut committed: Option<(CommitSnapshotResponse, usize, usize)> = None;
-    let mut base_version = base_version;
+    let mut result: Option<(CommitSnapshotResponse, usize, usize)> = None;
 
     for attempt in 0..2 {
+        let discovered = discover_files(object_id, wine_prefix, &variant.variant_id).await?;
+        let files: Vec<SnapshotFileEntry> = discovered.iter().map(|f| f.entry.clone()).collect();
+
+        let total_size: u64 = files.iter().map(|f| f.size_bytes).sum();
+        if files.len() > MAX_SNAPSHOT_FILES {
+            return Err(anyhow!(
+                "Too many save files ({} > {MAX_SNAPSHOT_FILES})",
+                files.len()
+            ));
+        }
+        if total_size > MAX_SNAPSHOT_BYTES {
+            return Err(anyhow!("Save files exceed 2 GiB limit"));
+        }
+
+        let aggregate_hash = build_aggregate_hash(std::slice::from_ref(&variant), &files)?;
+
+        let snapshots = list_snapshots(&client, shop, object_id).await?;
+        let base_version = snapshots.last().map(|s| s.version).unwrap_or(0);
+
         match prepare_upload_commit(
             &client,
             shop,
@@ -624,24 +625,28 @@ pub async fn sync_cloud_save(
         )
         .await
         {
-            Ok(result) => {
-                committed = Some(result);
+            Ok((committed, uploaded_files, skipped_files)) => {
+                if committed.version != base_version + 1
+                    || committed.file_count != files.len() as u64
+                    || committed.total_size_bytes != total_size
+                    || committed.aggregate_hash != aggregate_hash
+                {
+                    return Err(anyhow!("Committed snapshot is inconsistent"));
+                }
+                result = Some((committed, uploaded_files, skipped_files));
                 break;
             }
             Err(err) => {
-                let retryable = err
-                    .chain()
-                    .any(|cause| {
-                        let msg = cause.to_string();
-                        msg.contains("409")
-                            || msg.contains("401")
-                            || msg.contains("403")
-                            || msg.contains("pending-snapshot")
-                            || msg.contains("pending_snapshot")
-                    });
+                let retryable = err.chain().any(|cause| {
+                    let msg = cause.to_string();
+                    msg.contains("409")
+                        || msg.contains("401")
+                        || msg.contains("403")
+                        || msg.contains("pending-snapshot")
+                        || msg.contains("pending_snapshot")
+                        || msg.contains("changed during sync")
+                });
                 if attempt == 0 && retryable {
-                    let snapshots = list_snapshots(&client, shop, object_id).await?;
-                    base_version = snapshots.last().map(|s| s.version).unwrap_or(0);
                     last_error = Some(err);
                     continue;
                 }
@@ -651,15 +656,7 @@ pub async fn sync_cloud_save(
     }
 
     let (committed, uploaded_files, skipped_files) =
-        committed.ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("Commit did not complete")))?;
-
-    if committed.version != base_version + 1
-        || committed.file_count != files.len() as u64
-        || committed.total_size_bytes != total_size
-        || committed.aggregate_hash != aggregate_hash
-    {
-        return Err(anyhow!("Committed snapshot is inconsistent"));
-    }
+        result.ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("Commit did not complete")))?;
 
     write_state(
         shop,
