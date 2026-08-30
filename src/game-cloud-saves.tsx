@@ -3,7 +3,7 @@ import { api } from "./hydra-api";
 import { toaster } from "@decky/api";
 import { Button, ConfirmModal, PanelSection, Spinner, showModal } from "@decky/ui";
 import { composeToastLogo, formatBytes } from "./helpers";
-import { useAuthStore, useCurrentGame, useUserStore } from "./stores";
+import { useAuthStore, useCloudSaveGuard, useCurrentGame, useUserStore } from "./stores";
 import { restoreCloudSave, syncCloudSave } from "./events";
 import { CheckIcon, CloudIcon } from "./components";
 import { useDate } from "./hooks";
@@ -80,6 +80,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       );
 
       if (result.auth) setAuth(result.auth);
+      useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
 
       toaster.toast({
         title: "Cloud save synced",
@@ -126,6 +127,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       );
 
       if (result.auth) setAuth(result.auth);
+      useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
 
       const skippedNote = result.skippedFiles.length
         ? ` (${result.skippedFiles.length} files skipped)`

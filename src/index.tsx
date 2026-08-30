@@ -5,6 +5,7 @@ import { AppLifetimeNotification } from "@decky/ui/dist/globals/steam-client/Gam
 import styles from "./styles/globals.scss";
 import {
   useAuthStore,
+  useCloudSaveGuard,
   useCurrentGame,
   useLibraryStore,
   useNavigationStore,
@@ -16,7 +17,13 @@ import { WSClient } from "./ws";
 import { composeToastLogo } from "./helpers";
 import { GameCloudSaves } from "./game-cloud-saves";
 import { AuthGuide } from "./auth-guide";
-import { getAuth, getLibrary, isHydraLauncherRunning, syncCloudSave } from "./events";
+import {
+  checkCloudSaveStatus,
+  getAuth,
+  getLibrary,
+  isHydraLauncherRunning,
+  syncCloudSave,
+} from "./events";
 import { HydraLogo } from "./components";
 import type { Game, User } from "./api-types";
 
@@ -101,6 +108,29 @@ const onAppLifetimeNotification = async (
       setRemoteId(game.remoteId);
       setStartedAt(startedAt);
 
+      // Pre-launch guard: the plugin cannot block a Steam launch, so when the
+      // remote snapshot is newer we suppress this session's post-exit sync and
+      // point the user at a manual restore instead.
+      if (game.automaticCloudSync && auth && hasActiveSubscription) {
+        checkCloudSaveStatus(auth, game.objectId)
+          .then((status) => {
+            if (status.auth) {
+              useAuthStore.getState().setAuth(status.auth);
+            }
+            if (status.remoteNewer) {
+              useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+              toaster.toast({
+                title: "Newer cloud save available",
+                body: `${game.title} has a newer save in the cloud. This session will not sync — restore it from the Hydra plugin to keep the cloud version.`,
+                logo: composeToastLogo(game.iconUrl),
+              });
+            }
+          })
+          .catch((err) => {
+            console.error("Failed to check cloud save status", err);
+          });
+      }
+
       console.log("Started at", startedAt);
 
       updateInterval = setInterval(async () => {
@@ -140,6 +170,19 @@ const onAppLifetimeNotification = async (
     }
 
     const isHydraRunning = await isHydraLauncherRunning();
+
+    const remoteNewer = useCloudSaveGuard
+      .getState()
+      .remoteNewerGames.includes(game.objectId);
+
+    if (remoteNewer) {
+      toaster.toast({
+        title: "Cloud sync skipped",
+        body: "A newer cloud save exists. Restore it from the Hydra plugin, or sync manually to overwrite the cloud version.",
+        logo: composeToastLogo(game.iconUrl),
+      });
+      return;
+    }
 
     if (
       game.automaticCloudSync &&

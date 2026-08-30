@@ -241,6 +241,12 @@ fn state_path(shop: &str, object_id: &str) -> Result<PathBuf> {
     Ok(state_dir()?.join(format!("{shop}-{object_id}.json")))
 }
 
+fn read_state(shop: &str, object_id: &str) -> Option<CloudSaveState> {
+    let path = state_path(shop, object_id).ok()?;
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
 fn write_state(shop: &str, object_id: &str, state: &CloudSaveState) -> Result<()> {
     let dir = state_dir()?;
     std::fs::create_dir_all(&dir)?;
@@ -1279,6 +1285,54 @@ pub async fn restore_cloud_save(
         version: manifest.snapshot.version,
         restored_files,
         skipped_files,
+        auth: Some(auth),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Remote status check (pre-launch guard)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSaveStatus {
+    pub ok: bool,
+    pub remote_newer: bool,
+    pub remote_version: Option<u64>,
+    pub local_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<Auth>,
+}
+
+/// Compares the latest remote snapshot with the local sync state. The plugin
+/// cannot block a Steam launch, so callers use this to suppress the post-exit
+/// sync (protecting newer remote data) and prompt a manual restore instead.
+pub async fn check_cloud_save_status(auth_json: &str, object_id: &str, shop: &str) -> Result<CloudSaveStatus> {
+    let auth: Auth = serde_json::from_str(auth_json).context("Invalid auth payload")?;
+    let base_client = reqwest::Client::new();
+    let auth = ensure_fresh_token(&base_client, &auth).await?;
+    let client = hydra_client(&auth)?;
+
+    let snapshots = list_snapshots(&client, shop, object_id).await?;
+    let latest = snapshots.last();
+    let state = read_state(shop, object_id);
+
+    let remote_newer = match (latest, &state) {
+        (Some(remote), Some(local)) => {
+            remote.version > local.version
+                || (remote.version == local.version
+                    && remote.aggregate_hash != local.aggregate_hash)
+        }
+        // A remote snapshot exists but this device never synced: remote is newer.
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+
+    Ok(CloudSaveStatus {
+        ok: true,
+        remote_newer,
+        remote_version: latest.map(|s| s.version),
+        local_version: state.map(|s| s.version),
         auth: Some(auth),
     })
 }

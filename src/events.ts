@@ -2,6 +2,7 @@ import { callable } from "@decky/api";
 import type {
   Auth,
   CloudSaveRestoreResult,
+  CloudSaveStatus,
   CloudSaveSyncResult,
   Game,
 } from "./api-types";
@@ -26,3 +27,6 @@ export const restoreCloudSave = callable<
   [Auth, string, string | null],
   CloudSaveRestoreResult
 >("restore_cloud_save");
+export const checkCloudSaveStatus = callable<[Auth, string], CloudSaveStatus>(
+  "check_cloud_save_status"
+);

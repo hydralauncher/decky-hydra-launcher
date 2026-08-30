@@ -62,6 +62,10 @@ class Plugin:
         result = await _run_backend(["restore-cloud-save", object_id, wine_prefix or ""], json.dumps(auth))
         return json.loads(result)
 
+    async def check_cloud_save_status(self, auth: dict, object_id: str):
+        result = await _run_backend(["check-cloud-save-status", object_id], json.dumps(auth))
+        return json.loads(result)
+
     async def is_hydra_launcher_running(self):
         temp_dir = tempfile.gettempdir()
         lockfile = f"{temp_dir}/hydra-launcher.lock"

@@ -77,6 +77,18 @@ async fn main() {
                 }
             }
         }
+        "check-cloud-save-status" => {
+            let auth_json = read_auth_from_stdin();
+            let object_id = std::env::args().nth(2).expect("no object id given");
+
+            match cloud_save::check_cloud_save_status(&auth_json, &object_id, "steam").await {
+                Ok(result) => println!("{}", serde_json::to_string(&result).unwrap()),
+                Err(err) => {
+                    println!("{}", serde_json::json!({ "ok": false, "error": format!("{err:#}") }));
+                    std::process::exit(1);
+                }
+            }
+        }
         _ => {
             println!("Invalid command");
         }

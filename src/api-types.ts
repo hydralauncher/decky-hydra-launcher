@@ -39,6 +39,14 @@ export interface CloudSaveRestoreResult {
   auth?: Auth;
 }
 
+export interface CloudSaveStatus {
+  ok: boolean;
+  remoteNewer: boolean;
+  remoteVersion: number | null;
+  localVersion: number | null;
+  auth?: Auth;
+}
+
 export interface Auth {
   accessToken: string;
   refreshToken: string;
