@@ -1030,8 +1030,9 @@ impl RestoreContext {
                 .map(|p| format!("{p}/drive_c/ProgramData{rest}"))
         } else if let Some(rest) = raw_path.strip_prefix("<home>") {
             // In manifest rules <home> means the Windows user profile when the
-            // path targets AppData; otherwise it is the Linux home directory.
-            if rest.starts_with("/AppData/") {
+            // path targets AppData; on native games (no Wine prefix) ludusavi
+            // maps those same paths onto the Linux home directory instead.
+            if rest.starts_with("/AppData/") && self.wine_prefix.is_some() {
                 profile_root.map(|p| format!("{p}{rest}"))
             } else {
                 self.home_dir
