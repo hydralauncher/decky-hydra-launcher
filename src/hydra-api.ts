@@ -31,7 +31,7 @@ const refreshToken: BeforeRequestHook = async (request) => {
           .json<{
             expiresIn: number;
             accessToken: string;
-            refreshToken: string;
+            refreshToken?: string;
           }>();
 
         setAuth({

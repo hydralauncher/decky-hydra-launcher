@@ -33,7 +33,9 @@ pub struct Auth {
 struct RefreshResponse {
     expires_in: f64,
     access_token: String,
-    refresh_token: String,
+    // The server does not rotate the refresh token; older plugin versions
+    // required this field and hard-failed every refresh.
+    refresh_token: Option<String>,
 }
 
 pub async fn ensure_fresh_token(client: &reqwest::Client, auth: &Auth) -> Result<Auth> {
@@ -65,7 +67,7 @@ pub async fn ensure_fresh_token(client: &reqwest::Client, auth: &Auth) -> Result
 
     Ok(Auth {
         access_token: response.access_token,
-        refresh_token: response.refresh_token,
+        refresh_token: response.refresh_token.unwrap_or(auth.refresh_token.clone()),
         token_expiration_timestamp: Some(now_ms + response.expires_in * 1000.0),
     })
 }

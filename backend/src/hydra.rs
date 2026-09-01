@@ -86,13 +86,49 @@ pub fn get_auth() -> String {
 pub fn get_library() -> String {
     let mut snapshot = get_leveldb_snapshot();
 
+    // The launcher stores the v2 auto-sync toggle in a separate sublevel; the
+    // legacy game flag is no longer the source of truth. v2 sync defaults to
+    // enabled for Steam games unless the sublevel explicitly says false.
+    let mut sync_settings: HashMap<String, bool> = HashMap::new();
+    let mut iter = snapshot.db.new_iter().unwrap();
+    while let Some((key_bytes, value_bytes)) = iter.next() {
+        let key = String::from_utf8(key_bytes).unwrap();
+        if let Some(game_key) = key.strip_prefix("!cloud-save-automatic-sync-settings!") {
+            let value = String::from_utf8(value_bytes).unwrap();
+            let enabled = matches!(value.trim(), "true" | "\"true\"");
+            sync_settings.insert(game_key.to_string(), enabled);
+        }
+    }
+
+    let wine_prefixes_dir = dirs::config_dir()
+        .unwrap()
+        .join("hydralauncher")
+        .join("wine-prefixes");
+
     let mut iter = snapshot.db.new_iter().unwrap();
     let mut library = Vec::new();
 
     while let Some((key_bytes, value_bytes)) = iter.next() {
         let key = String::from_utf8(key_bytes).unwrap();
         if key.starts_with("!games") {
-            let game: Game = serde_json::from_str(&String::from_utf8(value_bytes).unwrap()).unwrap();
+            let mut game: Game = serde_json::from_str(&String::from_utf8(value_bytes).unwrap()).unwrap();
+
+            let game_key = format!("{}:{}", game.shop, game.object_id);
+            if let Some(enabled) = sync_settings.get(&game_key) {
+                game.automatic_cloud_sync = Some(*enabled);
+            } else if game.shop == "steam" {
+                game.automatic_cloud_sync = Some(true);
+            }
+
+            // Newer launchers keep per-game prefixes under wine-prefixes/<id>
+            // and no longer write winePrefixPath into the game record.
+            if game.wine_prefix_path.is_none() {
+                let candidate = wine_prefixes_dir.join(&game.object_id);
+                if candidate.is_dir() {
+                    game.wine_prefix_path = Some(candidate.to_string_lossy().to_string());
+                }
+            }
+
             library.push(game);
         }
     }
