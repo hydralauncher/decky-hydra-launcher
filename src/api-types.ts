@@ -69,7 +69,7 @@ export interface Game {
   title: string;
   iconUrl: string;
   objectId: string;
-  shop: "steam";
+  shop: string;
   winePrefixPath: string | null;
   automaticCloudSync: boolean;
   isDeleted?: boolean;

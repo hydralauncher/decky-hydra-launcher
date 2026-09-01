@@ -563,7 +563,9 @@ async fn discover_files(
         ));
     };
 
-    let rules = crate::rules::GameRules::load(object_id, wine_prefix).await?;
+    let rules = crate::rules::GameRules::load(object_id, wine_prefix)
+        .await?
+        .ok_or_else(|| anyhow!("Save rules unavailable for this game; sync aborted"))?;
 
     let default_variant = build_default_variant(shop, object_id);
     let mut variants: Vec<SnapshotVariant> = vec![default_variant.clone()];
@@ -605,35 +607,24 @@ async fn discover_files(
             let tokenized = tokenize_windows_path(&portable, user_profile.as_deref());
 
             // Snapshot identity uses the ludusavi rule path, matching what the
-            // desktop launcher produces for the same file.
-            let (raw_path, relative_path, variant) = match rules
-                .as_ref()
-                .and_then(|rules| rules.match_rule(&tokenized))
-            {
-                Some(rule_match) => {
-                    let (raw_path, relative_path) =
-                        crate::rules::split_rule_match(rule_match.raw_path, rule_match.kind, &tokenized);
-                    let variant = match &rule_match.store_user {
-                        Some(folder) => {
-                            let variant = build_opaque_variant(shop, object_id, folder);
-                            if !variants.iter().any(|v| v.variant_id == variant.variant_id) {
-                                variants.push(variant.clone());
-                            }
-                            variant
-                        }
-                        None => default_variant.clone(),
-                    };
-                    (raw_path, relative_path, variant)
+            // desktop launcher produces for the same file. A file with no
+            // matching rule would get a fabricated identity that restore
+            // refuses — fail instead of committing unrestorable data.
+            let rule_match = rules
+                .match_rule(&tokenized)
+                .ok_or_else(|| anyhow!("No save rule matches discovered file: {tokenized}"))?;
+
+            let (raw_path, relative_path) =
+                crate::rules::split_rule_match(rule_match.raw_path, rule_match.kind, &tokenized);
+            let variant = match &rule_match.store_user {
+                Some(folder) => {
+                    let variant = build_opaque_variant(shop, object_id, folder);
+                    if !variants.iter().any(|v| v.variant_id == variant.variant_id) {
+                        variants.push(variant.clone());
+                    }
+                    variant
                 }
-                None => {
-                    let (dir, name) = match tokenized.rsplit_once('/') {
-                        Some((dir, name)) if !dir.is_empty() && !name.is_empty() => {
-                            (dir.to_string(), name.to_string())
-                        }
-                        _ => ("<root>".to_string(), tokenized.clone()),
-                    };
-                    (dir, name, default_variant.clone())
-                }
+                None => default_variant.clone(),
             };
 
             let hash = sha256_file_hex(&real_path).await.map_err(|_| {
@@ -1336,8 +1327,16 @@ pub async fn restore_cloud_save(
 
     let temp = tempfile::tempdir().context("Failed to create temp dir")?;
 
+    // Download blobs, deduplicated by content hash. Only hashes referenced by
+    // the already-validated manifest are fetched; the hash becomes a path
+    // component, so anything else is rejected.
+    let manifest_hashes: std::collections::HashSet<&str> =
+        manifest.files.iter().map(|f| f.hash.as_str()).collect();
     let mut blob_urls: HashMap<String, (String, u64)> = HashMap::new();
     for file in &download_files {
+        if !is_valid_hash(&file.hash) || !manifest_hashes.contains(file.hash.as_str()) {
+            continue;
+        }
         blob_urls
             .entry(file.hash.clone())
             .or_insert_with(|| (file.download_url.clone(), file.size_bytes));
