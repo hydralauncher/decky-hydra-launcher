@@ -31,3 +31,4 @@ export const checkCloudSaveStatus = callable<
   [Auth, string, string | null],
   CloudSaveStatus
 >("check_cloud_save_status");
+export const logEvent = callable<[string], void>("log");

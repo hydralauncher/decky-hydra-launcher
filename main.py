@@ -103,3 +103,6 @@ class Plugin:
         temp_dir = tempfile.gettempdir()
         lockfile = f"{temp_dir}/hydra-launcher.lock"
         return os.path.exists(lockfile)
+
+    async def log(self, message: str):
+        decky.logger.info("frontend: %s", message)

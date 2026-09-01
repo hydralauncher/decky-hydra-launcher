@@ -70,6 +70,7 @@ pub async fn backup_game(
 ) -> Result<String, String> {
     let ludusavi_binary_path = get_ludusavi_binary_path()
         .ok_or_else(|| "Ludusavi binary not found".to_string())?;
+    eprintln!("ludusavi binary: {}", ludusavi_binary_path.display());
     let ludusavi_path = ensure_ludusavi_config()?;
 
     let mut args = vec![

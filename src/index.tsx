@@ -22,6 +22,7 @@ import {
   getAuth,
   getLibrary,
   isHydraLauncherRunning,
+  logEvent,
   syncCloudSave,
 } from "./events";
 import { HydraLogo } from "./components";
@@ -105,6 +106,10 @@ const onAppLifetimeNotification = async (
   });
 
   if (game) {
+    logEvent(
+      `app ${notification.bRunning ? "launch" : "exit"}: ${game.title} (${game.objectId})`
+    );
+
     if (notification.bRunning) {
       const startedAt = new Date();
       lastTick = startedAt;
@@ -124,6 +129,7 @@ const onAppLifetimeNotification = async (
             }
             if (status.remoteNewer) {
               useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+              logEvent(`guard flagged: ${game.objectId} (remote v${status.remoteVersion}, local v${status.localVersion ?? "none"})`);
               // Skip the toast when the session already ended; the exit
               // handler shows the authoritative "sync skipped" message.
               if (useCurrentGame.getState().objectId === game.objectId) {
@@ -135,6 +141,7 @@ const onAppLifetimeNotification = async (
               }
             } else {
               useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
+              logEvent(`guard clear: ${game.objectId} (remote v${status.remoteVersion})`);
             }
           })
           .catch((err) => {
@@ -222,6 +229,7 @@ const onAppLifetimeNotification = async (
       !isHydraRunning
     ) {
       try {
+        logEvent(`auto-sync start: ${game.objectId}`);
         const result = await syncCloudSave(
           freshAuth,
           game.objectId,
@@ -238,8 +246,10 @@ const onAppLifetimeNotification = async (
           body: `${game.title} save has been uploaded to the cloud`,
           logo: composeToastLogo(game.iconUrl),
         });
+        logEvent(`auto-sync done: ${game.objectId} v${result.version}`);
       } catch (error: unknown) {
         console.error("Failed to sync cloud save", error);
+        logEvent(`auto-sync failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
 
         if (error instanceof Error && error.message.includes("remote-newer")) {
           // Another device synced since the launch check: suppress auto-sync

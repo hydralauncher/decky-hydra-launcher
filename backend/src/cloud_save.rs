@@ -658,6 +658,14 @@ async fn discover_files(
         return Err(anyhow!("No save files found for this game"));
     }
 
+    let total: u64 = files.iter().map(|f| f.entry.size_bytes).sum();
+    eprintln!(
+        "discovery: {} files, {} bytes, {} variants",
+        files.len(),
+        total,
+        variants.len()
+    );
+
     Ok(DiscoveryOutput { files, variants })
 }
 
@@ -977,6 +985,12 @@ async fn prepare_upload_commit(
         .iter()
         .filter(|f| f.status == "upload")
         .count();
+    eprintln!(
+        "prepare: {} files to upload ({} unique blobs), {} already remote",
+        uploaded_files,
+        jobs.len(),
+        skipped_files
+    );
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
     let mut join_set = tokio::task::JoinSet::new();
 
@@ -1411,14 +1425,22 @@ pub async fn restore_cloud_save(
     let mut restored_files = 0usize;
     let mut skipped_files: Vec<String> = Vec::new();
 
+    eprintln!(
+        "restore: {} files in manifest v{}",
+        manifest.files.len(),
+        manifest.snapshot.version
+    );
+
     for file in &manifest.files {
+        let display = || format!("{}/{}", file.raw_path, file.relative_path);
+
         if !is_safe_manifest_file(file) {
-            skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
+            skipped_files.push(format!("{} (invalid manifest entry)", display()));
             continue;
         }
 
         if !rules.allows_raw_path(&file.raw_path) {
-            skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
+            skipped_files.push(format!("{} (path not in game rules)", display()));
             continue;
         }
 
@@ -1429,13 +1451,13 @@ pub async fn restore_cloud_save(
         let Some(target) =
             context.resolve_with_variant(&file.variant_id, &effective_raw, "")
         else {
-            skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
+            skipped_files.push(format!("{} (no local target)", display()));
             continue;
         };
 
         let blob_path = temp.path().join(&file.hash);
         if !blob_path.exists() {
-            skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
+            skipped_files.push(format!("{} (blob missing)", display()));
             continue;
         }
 
@@ -1481,9 +1503,13 @@ pub async fn restore_cloud_save(
             Ok(()) => restored_files += 1,
             Err(err) => {
                 eprintln!("Failed to restore {}: {err:#}", target.display());
-                skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
+                skipped_files.push(format!("{} (write failed)", display()));
             }
         }
+    }
+
+    if !skipped_files.is_empty() {
+        eprintln!("restore skips: {}", skipped_files.join("; "));
     }
 
     // Only record the snapshot as current when every file landed. A partial
