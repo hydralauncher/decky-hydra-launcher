@@ -15,6 +15,9 @@ STATUS_TIMEOUT = 30
 
 
 async def _run_backend(args: list[str], stdin_data: str | None = None, timeout: int = BACKEND_TIMEOUT) -> str:
+    # Never log stdin_data: it carries the auth tokens.
+    decky.logger.info("backend call: %s", " ".join(args))
+
     process = await asyncio.create_subprocess_exec(
         BACKEND_PATH, *args,
         stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
@@ -29,9 +32,11 @@ async def _run_backend(args: list[str], stdin_data: str | None = None, timeout: 
     except asyncio.TimeoutError:
         process.kill()
         await process.wait()
+        decky.logger.error("backend timed out: %s", args[0])
         raise RuntimeError("Backend timed out")
 
     out = stdout.decode().strip()
+    err = stderr.decode().strip()
     if process.returncode != 0:
         message = None
         try:
@@ -40,7 +45,12 @@ async def _run_backend(args: list[str], stdin_data: str | None = None, timeout: 
                 message = payload.get("error")
         except ValueError:
             pass
-        raise RuntimeError(message or stderr.decode().strip() or "Backend failed")
+        decky.logger.error("backend failed: %s: %s (stderr: %s)", args[0], message or "unknown", err)
+        raise RuntimeError(message or err or "Backend failed")
+
+    if err:
+        decky.logger.info("backend stderr (%s): %s", args[0], err)
+    decky.logger.info("backend ok: %s", args[0])
     return out
 
 
@@ -64,15 +74,30 @@ class Plugin:
         if force:
             args.append("force")
         result = await _run_backend(args, json.dumps(auth))
-        return json.loads(result)
+        payload = json.loads(result)
+        decky.logger.info(
+            "sync done for %s: version=%s files=%s uploaded=%s skipped=%s",
+            object_id, payload.get("version"), payload.get("fileCount"),
+            payload.get("uploadedFiles"), payload.get("skippedFiles"))
+        return payload
 
     async def restore_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None):
         result = await _run_backend(["restore-cloud-save", object_id, wine_prefix or ""], json.dumps(auth))
-        return json.loads(result)
+        payload = json.loads(result)
+        decky.logger.info(
+            "restore done for %s: version=%s restored=%s skipped=%s",
+            object_id, payload.get("version"), payload.get("restoredFiles"),
+            len(payload.get("skippedFiles", [])))
+        return payload
 
     async def check_cloud_save_status(self, auth: dict, object_id: str, wine_prefix: str | None):
         result = await _run_backend(["check-cloud-save-status", object_id, wine_prefix or ""], json.dumps(auth), timeout=STATUS_TIMEOUT)
-        return json.loads(result)
+        payload = json.loads(result)
+        decky.logger.info(
+            "status for %s: remoteNewer=%s remote=%s local=%s",
+            object_id, payload.get("remoteNewer"), payload.get("remoteVersion"),
+            payload.get("localVersion"))
+        return payload
 
     async def is_hydra_launcher_running(self):
         temp_dir = tempfile.gettempdir()
