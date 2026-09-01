@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 import tempfile
 
 import decky
@@ -13,10 +14,18 @@ BACKEND_PATH = f"{PLUGIN_DIR}/bin/backend"
 BACKEND_TIMEOUT = 4 * 60 * 60
 STATUS_TIMEOUT = 30
 
+# Only log arguments that cannot carry credentials: plain ids and local paths.
+# URLs (presigned download links) and anything with query strings stay out.
+_SAFE_ARG = re.compile(r"^[A-Za-z0-9_./~ -]{1,200}$")
+
+
+def _loggable_args(args: list[str]) -> str:
+    return " ".join(a if _SAFE_ARG.match(a) else "<redacted>" for a in args)
+
 
 async def _run_backend(args: list[str], stdin_data: str | None = None, timeout: int = BACKEND_TIMEOUT) -> str:
-    # Never log stdin_data: it carries the auth tokens.
-    decky.logger.info("backend call: %s", " ".join(args))
+    # Never log stdin_data (auth tokens) or URLs (presigned credentials).
+    decky.logger.info("backend call: %s", _loggable_args(args))
 
     process = await asyncio.create_subprocess_exec(
         BACKEND_PATH, *args,
