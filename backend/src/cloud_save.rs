@@ -515,7 +515,11 @@ fn tokenize_windows_path(path: &str, user_profile: Option<&str>) -> String {
     }
     replacements.push(("C:/users/Public".into(), "<winPublic>".into()));
     if let Some(home) = dirs::home_dir() {
-        replacements.push((home.to_string_lossy().to_string(), "<home>".into()));
+        let home = home.to_string_lossy().to_string();
+        // XDG tokens must precede the generic <home> replacement.
+        replacements.push((format!("{home}/.local/share"), "<xdgData>".into()));
+        replacements.push((format!("{home}/.config"), "<xdgConfig>".into()));
+        replacements.push((home, "<home>".into()));
     }
 
     // Longest prefix match first.
@@ -1398,8 +1402,11 @@ pub async fn restore_cloud_save(
     };
 
     // Only write paths ludusavi designated for this game (same guard as the
-    // desktop launcher's blocked-rule-unavailable).
-    let rules = crate::rules::GameRules::load(object_id, wine_prefix).await?;
+    // desktop launcher's blocked-rule-unavailable). Without the rules the
+    // allowlist cannot be evaluated — abort rather than fail open.
+    let rules = crate::rules::GameRules::load(object_id, wine_prefix)
+        .await?
+        .ok_or_else(|| anyhow!("Save rules unavailable for this game; restore aborted"))?;
 
     let mut restored_files = 0usize;
     let mut skipped_files: Vec<String> = Vec::new();
@@ -1410,11 +1417,9 @@ pub async fn restore_cloud_save(
             continue;
         }
 
-        if let Some(rules) = &rules {
-            if !rules.allows_raw_path(&file.raw_path) {
-                skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
-                continue;
-            }
+        if !rules.allows_raw_path(&file.raw_path) {
+            skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
+            continue;
         }
 
         // File rules store the full path in rawPath; dir/glob rules store the

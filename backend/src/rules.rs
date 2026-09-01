@@ -70,6 +70,35 @@ fn compile_rule(raw_path: &str) -> Option<CompiledRule> {
                 }
             }
             '?' => pattern.push('.'),
+            '[' => {
+                // Character class, ludusavi globset semantics: [!...] negates.
+                let mut class = String::from("[");
+                if chars.peek() == Some(&'!') {
+                    chars.next();
+                    class.push('^');
+                }
+                for next in chars.by_ref() {
+                    if next == ']' {
+                        break;
+                    }
+                    class.push(next);
+                }
+                class.push(']');
+                pattern.push_str(&class);
+            }
+            '{' => {
+                // Brace alternation: {a,b} matches a or b.
+                let mut group = String::from("(?:");
+                for next in chars.by_ref() {
+                    match next {
+                        '}' => break,
+                        ',' => group.push('|'),
+                        other => group.push_str(&regex::escape(&other.to_string())),
+                    }
+                }
+                group.push(')');
+                pattern.push_str(&group);
+            }
             '<' => {
                 let mut token = String::new();
                 for next in chars.by_ref() {
@@ -292,6 +321,15 @@ mod tests {
     fn dir_rule_does_not_match_sibling_prefix() {
         let rules = rules(&["<winAppData>/Game"]);
         assert!(rules.match_rule("<winAppData>/GameX/file.sav").is_none());
+    }
+
+    #[test]
+    fn matches_range_and_brace_globs() {
+        let rules = rules(&["<home>/Game/TEC2Slot[0-3].sol", "<base>/save{0,1}.dat"]);
+        assert!(rules.match_rule("<home>/Game/TEC2Slot2.sol").is_some());
+        assert!(rules.match_rule("<home>/Game/TEC2Slot9.sol").is_none());
+        assert!(rules.match_rule("<base>/save1.dat").is_some());
+        assert!(rules.match_rule("<base>/save2.dat").is_none());
     }
 
     #[test]
