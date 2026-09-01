@@ -17,6 +17,9 @@ export interface GameCloudSavesProps {
 export function GameCloudSaves({ game }: GameCloudSavesProps) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
+  const [snapshotState, setSnapshotState] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
   const [snapshot, setSnapshot] = useState<CloudSaveSnapshotSummary | null>(
     null
   );
@@ -25,6 +28,9 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
   const { auth, setAuth } = useAuthStore();
   const { hasActiveSubscription } = useUserStore();
   const { objectId } = useCurrentGame();
+  const isRemoteNewer = useCloudSaveGuard((state) =>
+    state.remoteNewerGames.includes(game.objectId)
+  );
 
   const { formatDateTime } = useDate();
 
@@ -32,6 +38,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
   const canSync = Boolean(auth && hasActiveSubscription);
 
   const getSnapshot = useCallback(async () => {
+    setSnapshotState("loading");
     try {
       const snapshots = await api
         .get<CloudSaveSnapshotSummary[]>(
@@ -41,9 +48,11 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
 
       const latest = snapshots.sort((a, b) => b.version - a.version)[0];
       setSnapshot(latest ?? null);
+      setSnapshotState("ready");
     } catch (error: unknown) {
       console.error("Failed to load cloud save snapshot", error);
       setSnapshot(null);
+      setSnapshotState("error");
     }
   }, [game.objectId]);
 
@@ -76,7 +85,8 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       const result = await syncCloudSave(
         auth,
         game.objectId,
-        game.winePrefixPath
+        game.winePrefixPath,
+        true
       );
 
       if (result.auth) setAuth(result.auth);
@@ -191,6 +201,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
   }, [syncNow, game.objectId]);
 
   return (
+    <>
     <PanelSection title="Cloud Saves">
       <div className="game-cloud-saves__header">
         <div className="game-cloud-saves__details">
@@ -226,10 +237,33 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         )}
 
         <span className="game-cloud-saves__info">
-          {snapshot
-            ? `Version ${snapshot.version} - ${snapshot.fileCount} files - ${formatBytes(snapshot.totalSizeBytes)} - ${formatDateTime(snapshot.updatedAt)}`
-            : "No cloud save snapshot found for this game yet."}
+          {snapshotState === "loading" && "Loading cloud save info..."}
+          {snapshotState === "error" &&
+            "Could not load cloud save info. Check your connection."}
+          {snapshotState === "ready" &&
+            (snapshot
+              ? `Version ${snapshot.version} - ${snapshot.fileCount} files - ${formatBytes(snapshot.totalSizeBytes)} - ${formatDateTime(snapshot.updatedAt)}`
+              : "No cloud save snapshot found for this game yet.")}
         </span>
+
+        {snapshotState === "error" && (
+          <Button className="cloud-save" onClick={getSnapshot}>
+            Retry
+          </Button>
+        )}
+
+        {isRemoteNewer && (
+          <span className="game-cloud-saves__warning">
+            A newer cloud save exists on another device. Restoring is
+            recommended; syncing now will overwrite the cloud version.
+          </span>
+        )}
+
+        {!canSync && (
+          <span className="game-cloud-saves__info">
+            Cloud saves require an active Hydra Cloud subscription.
+          </span>
+        )}
       </div>
 
       <div className="game-cloud-saves__cloud-saves">
@@ -268,6 +302,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
           )}
         </Button>
       </div>
+    </PanelSection>
 
       {artifacts.length > 0 && (
         <PanelSection title="Legacy Backups (read-only)">
@@ -286,6 +321,6 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
           ))}
         </PanelSection>
       )}
-    </PanelSection>
+    </>
   );
 }

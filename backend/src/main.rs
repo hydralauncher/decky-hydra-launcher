@@ -1,9 +1,10 @@
-use ludusavi::{get_backup_preview, check_if_ludusavi_binary_exists};
+use ludusavi::check_if_ludusavi_binary_exists;
 use hydra::{get_auth, get_library, download_game_artifact};
 
 mod cloud_save;
 mod ludusavi;
 mod hydra;
+mod rules;
 mod wine;
 
 fn optional_arg(value: Option<String>) -> Option<String> {
@@ -31,12 +32,6 @@ async fn main() {
             let library = get_library();
             println!("{}", library);
         }
-        "get-backup-preview" => {
-            let object_id = std::env::args().nth(2).expect("no object id given");
-            let wine_prefix = std::env::args().nth(3).expect("no wine prefix given");
-            let preview = get_backup_preview(&object_id, Some(&wine_prefix)).await.unwrap();
-            println!("{}", preview);
-        }
         "download-game-artifact" => {
             let object_id = std::env::args().nth(2).expect("no object id given");
             let download_url = std::env::args().nth(3).expect("no download url given");
@@ -55,8 +50,9 @@ async fn main() {
             let auth_json = read_auth_from_stdin();
             let object_id = std::env::args().nth(2).expect("no object id given");
             let wine_prefix = optional_arg(std::env::args().nth(3));
+            let force = std::env::args().nth(4).as_deref() == Some("force");
 
-            match cloud_save::sync_cloud_save(&auth_json, &object_id, "steam", wine_prefix.as_deref()).await {
+            match cloud_save::sync_cloud_save(&auth_json, &object_id, "steam", wine_prefix.as_deref(), force).await {
                 Ok(result) => println!("{}", serde_json::to_string(&result).unwrap()),
                 Err(err) => {
                     println!("{}", serde_json::json!({ "ok": false, "error": format!("{err:#}") }));

@@ -85,25 +85,24 @@ export class WSClient {
     }
   }
 
-  private static async tryReconnect() {
+  private static tryReconnect() {
     if (this.reconnecting) return;
     this.reconnecting = true;
 
     console.info(`Reconnecting in ${this.reconnectInterval / 1000}s...`);
 
-    setTimeout(async () => {
-      try {
-        await this.connect();
-      } catch (err) {
-        console.error("Reconnect failed:", err);
-        this.reconnectInterval = Math.min(
-          this.reconnectInterval * 2,
-          this.maxReconnectInterval
-        );
-        this.reconnecting = false;
-        this.tryReconnect();
-      }
-    }, this.reconnectInterval);
+    const delay = this.reconnectInterval;
+    this.reconnectInterval = Math.min(
+      this.reconnectInterval * 2,
+      this.maxReconnectInterval
+    );
+
+    setTimeout(() => {
+      // connect() handles its own failures via handleDisconnect, which
+      // schedules the next attempt; the flag must be clear before that.
+      this.reconnecting = false;
+      this.connect();
+    }, delay);
   }
 
   private static cleanupSocket() {

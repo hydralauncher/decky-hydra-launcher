@@ -8,11 +8,13 @@ import decky
 PLUGIN_DIR = decky.DECKY_PLUGIN_DIR
 BACKEND_PATH = f"{PLUGIN_DIR}/bin/backend"
 
-# Sync/restore can involve large uploads; never block decky's event loop.
+# Sync/restore can involve large transfers; status checks must stay quick so
+# the exit handler never waits long on them.
 BACKEND_TIMEOUT = 4 * 60 * 60
+STATUS_TIMEOUT = 30
 
 
-async def _run_backend(args: list[str], stdin_data: str | None = None) -> str:
+async def _run_backend(args: list[str], stdin_data: str | None = None, timeout: int = BACKEND_TIMEOUT) -> str:
     process = await asyncio.create_subprocess_exec(
         BACKEND_PATH, *args,
         stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
@@ -22,7 +24,7 @@ async def _run_backend(args: list[str], stdin_data: str | None = None) -> str:
     try:
         stdout, stderr = await asyncio.wait_for(
             process.communicate(stdin_data.encode() if stdin_data is not None else None),
-            timeout=BACKEND_TIMEOUT,
+            timeout=timeout,
         )
     except asyncio.TimeoutError:
         process.kill()
@@ -31,10 +33,13 @@ async def _run_backend(args: list[str], stdin_data: str | None = None) -> str:
 
     out = stdout.decode().strip()
     if process.returncode != 0:
+        message = None
         try:
-            message = json.loads(out).get("error")
+            payload = json.loads(out)
+            if isinstance(payload, dict):
+                message = payload.get("error")
         except ValueError:
-            message = None
+            pass
         raise RuntimeError(message or stderr.decode().strip() or "Backend failed")
     return out
 
@@ -53,9 +58,12 @@ class Plugin:
         result = await _run_backend(["check-if-ludusavi-binary-exists"])
         return result == "true"
 
-    async def sync_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None):
+    async def sync_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None, force: bool):
         # Auth goes through stdin so tokens never appear in the process list.
-        result = await _run_backend(["sync-cloud-save", object_id, wine_prefix or ""], json.dumps(auth))
+        args = ["sync-cloud-save", object_id, wine_prefix or ""]
+        if force:
+            args.append("force")
+        result = await _run_backend(args, json.dumps(auth))
         return json.loads(result)
 
     async def restore_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None):
@@ -63,7 +71,7 @@ class Plugin:
         return json.loads(result)
 
     async def check_cloud_save_status(self, auth: dict, object_id: str):
-        result = await _run_backend(["check-cloud-save-status", object_id], json.dumps(auth))
+        result = await _run_backend(["check-cloud-save-status", object_id], json.dumps(auth), timeout=STATUS_TIMEOUT)
         return json.loads(result)
 
     async def is_hydra_launcher_running(self):

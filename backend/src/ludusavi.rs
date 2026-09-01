@@ -1,5 +1,8 @@
-use std::process::Command;
 use std::path::PathBuf;
+use std::time::Duration;
+use tokio::process::Command;
+
+const LUDUSAVI_TIMEOUT: Duration = Duration::from_secs(120);
 
 const LUDUSAVI_CONFIG: &str = r#"manifest:
   enable: false
@@ -90,10 +93,15 @@ pub async fn backup_game(
         args.push(prefix.to_string());
     }
 
-    let output = Command::new(&ludusavi_binary_path)
-        .args(&args)
-        .output()
-        .map_err(|e| format!("Failed to start Ludusavi: {}", e))?;
+    let output = match tokio::time::timeout(
+        LUDUSAVI_TIMEOUT,
+        Command::new(&ludusavi_binary_path).args(&args).output(),
+    )
+    .await
+    {
+        Ok(result) => result.map_err(|e| format!("Failed to start Ludusavi: {e}"))?,
+        Err(_) => return Err("Ludusavi timed out".to_string()),
+    };
 
     if !output.status.success() {
         return Err(format!(
@@ -104,11 +112,4 @@ pub async fn backup_game(
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-pub async fn get_backup_preview(
-    object_id: &str,
-    wine_prefix: Option<&str>,
-) -> Result<String, String> {
-    backup_game(object_id, None, wine_prefix, true).await
 }

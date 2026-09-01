@@ -120,6 +120,38 @@ pub fn build_default_variant(shop: &str, object_id: &str) -> SnapshotVariant {
     }
 }
 
+/// Per-user-folder variant, mirroring the launcher's identity code (verified
+/// against its test vectors below).
+pub fn build_opaque_variant(shop: &str, object_id: &str, concrete_folder_id: &str) -> SnapshotVariant {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CanonicalVariant<'a> {
+        variant_id_version: u32,
+        shop: &'a str,
+        object_id: &'a str,
+        kind: &'a str,
+        concrete_folder_id: &'a str,
+    }
+
+    let normalized = concrete_folder_id.nfc().collect::<String>().to_lowercase();
+    let canonical = CanonicalVariant {
+        variant_id_version: 1,
+        shop,
+        object_id,
+        kind: "opaque-folder",
+        concrete_folder_id: &normalized,
+    };
+    let serialized = serde_json::to_vec(&canonical).expect("variant serializes");
+    let variant_id = format!("{:x}", Sha256::digest(serialized));
+
+    SnapshotVariant {
+        variant_id,
+        kind: "opaque-folder".to_string(),
+        steam_id64: None,
+        concrete_folder_id: Some(normalized),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Aggregate hash (mirrors hydra native addon hashing/aggregate.rs)
 // ---------------------------------------------------------------------------
@@ -239,6 +271,12 @@ fn state_dir() -> Result<PathBuf> {
 }
 
 fn state_path(shop: &str, object_id: &str) -> Result<PathBuf> {
+    if !object_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(anyhow!("Invalid object id"));
+    }
     Ok(state_dir()?.join(format!("{shop}-{object_id}.json")))
 }
 
@@ -454,6 +492,11 @@ struct DiscoveredFile {
     source_path: PathBuf,
 }
 
+pub struct DiscoveryOutput {
+    files: Vec<DiscoveredFile>,
+    variants: Vec<SnapshotVariant>,
+}
+
 fn tokenize_windows_path(path: &str, user_profile: Option<&str>) -> String {
     let normalized = path.replace('\\', "/");
 
@@ -490,9 +533,9 @@ fn tokenize_windows_path(path: &str, user_profile: Option<&str>) -> String {
 
 async fn discover_files(
     object_id: &str,
+    shop: &str,
     wine_prefix: Option<&str>,
-    variant_id: &str,
-) -> Result<Vec<DiscoveredFile>> {
+) -> Result<DiscoveryOutput> {
     let output = backup_game(object_id, None, wine_prefix, true)
         .await
         .map_err(|e| anyhow!("Ludusavi backup preview failed: {e}"))?;
@@ -513,6 +556,11 @@ async fn discover_files(
             "Ludusavi matched multiple games for this id; refusing to guess"
         ));
     };
+
+    let rules = crate::rules::GameRules::load(object_id, wine_prefix).await?;
+
+    let default_variant = build_default_variant(shop, object_id);
+    let mut variants: Vec<SnapshotVariant> = vec![default_variant.clone()];
 
     let user_profile = wine_prefix.and_then(|prefix| get_windows_like_user_profile_path(prefix).ok());
     let drive_c = wine_prefix.map(|prefix| format!("{}/drive_c", prefix.trim_end_matches('/')));
@@ -550,11 +598,36 @@ async fn discover_files(
             };
             let tokenized = tokenize_windows_path(&portable, user_profile.as_deref());
 
-            let (raw_path, relative_path) = match tokenized.rsplit_once('/') {
-                Some((dir, name)) if !dir.is_empty() && !name.is_empty() => {
-                    (dir.to_string(), name.to_string())
+            // Snapshot identity uses the ludusavi rule path, matching what the
+            // desktop launcher produces for the same file.
+            let (raw_path, relative_path, variant) = match rules
+                .as_ref()
+                .and_then(|rules| rules.match_rule(&tokenized))
+            {
+                Some(rule_match) => {
+                    let (raw_path, relative_path) =
+                        crate::rules::split_rule_match(rule_match.raw_path, rule_match.kind, &tokenized);
+                    let variant = match &rule_match.store_user {
+                        Some(folder) => {
+                            let variant = build_opaque_variant(shop, object_id, folder);
+                            if !variants.iter().any(|v| v.variant_id == variant.variant_id) {
+                                variants.push(variant.clone());
+                            }
+                            variant
+                        }
+                        None => default_variant.clone(),
+                    };
+                    (raw_path, relative_path, variant)
                 }
-                _ => ("<root>".to_string(), tokenized.clone()),
+                None => {
+                    let (dir, name) = match tokenized.rsplit_once('/') {
+                        Some((dir, name)) if !dir.is_empty() && !name.is_empty() => {
+                            (dir.to_string(), name.to_string())
+                        }
+                        _ => ("<root>".to_string(), tokenized.clone()),
+                    };
+                    (dir, name, default_variant.clone())
+                }
             };
 
             let hash = sha256_file_hex(&real_path).await.map_err(|_| {
@@ -563,7 +636,7 @@ async fn discover_files(
 
             files.push(DiscoveredFile {
                 entry: SnapshotFileEntry {
-                    variant_id: variant_id.to_string(),
+                    variant_id: variant.variant_id,
                     raw_path,
                     relative_path,
                     hash,
@@ -579,7 +652,7 @@ async fn discover_files(
         return Err(anyhow!("No save files found for this game"));
     }
 
-    Ok(files)
+    Ok(DiscoveryOutput { files, variants })
 }
 
 async fn sha256_file_hex(path: &Path) -> Result<String> {
@@ -610,13 +683,12 @@ pub async fn sync_cloud_save(
     object_id: &str,
     shop: &str,
     wine_prefix: Option<&str>,
+    force: bool,
 ) -> Result<SyncResult> {
     let auth: Auth = serde_json::from_str(auth_json).context("Invalid auth payload")?;
     let base_client = reqwest::Client::new();
     let mut auth = ensure_fresh_token(&base_client, &auth).await?;
     let mut client = hydra_client(&auth)?;
-
-    let variant = build_default_variant(shop, object_id);
 
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
@@ -630,7 +702,7 @@ pub async fn sync_cloud_save(
     let mut result: Option<(CommitSnapshotResponse, usize, usize)> = None;
 
     for attempt in 0..2 {
-        let discovered = match discover_files(object_id, wine_prefix, &variant.variant_id).await {
+        let discovered = match discover_files(object_id, shop, wine_prefix).await {
             Ok(discovered) => discovered,
             Err(err) => {
                 let retryable = err
@@ -643,7 +715,7 @@ pub async fn sync_cloud_save(
                 return Err(err);
             }
         };
-        let files: Vec<SnapshotFileEntry> = discovered.iter().map(|f| f.entry.clone()).collect();
+        let files: Vec<SnapshotFileEntry> = discovered.files.iter().map(|f| f.entry.clone()).collect();
 
         let total_size: u64 = files.iter().map(|f| f.size_bytes).sum();
         if files.len() > MAX_SNAPSHOT_FILES {
@@ -656,9 +728,30 @@ pub async fn sync_cloud_save(
             return Err(anyhow!("Save files exceed 2 GiB limit"));
         }
 
-        let aggregate_hash = build_aggregate_hash(std::slice::from_ref(&variant), &files)?;
+        let aggregate_hash = build_aggregate_hash(&discovered.variants, &files)?;
 
         let snapshots = list_snapshots(&client, shop, object_id).await?;
+
+        // Refuse to silently overwrite a remote snapshot this device has not
+        // seen. Auto-sync passes force=false; manual sync confirms with the
+        // user first and passes force=true.
+        if !force {
+            if let Some(latest) = snapshots.last() {
+                let state = read_state(shop, object_id);
+                let remote_newer = match &state {
+                    Some(local) => {
+                        latest.version > local.version
+                            || (latest.version == local.version
+                                && latest.aggregate_hash != local.aggregate_hash)
+                    }
+                    None => true,
+                };
+                if remote_newer {
+                    return Err(anyhow!("remote-newer"));
+                }
+            }
+        }
+
         let base_version = snapshots.last().map(|s| s.version).unwrap_or(0);
 
         match prepare_upload_commit(
@@ -667,9 +760,9 @@ pub async fn sync_cloud_save(
             object_id,
             hostname.as_deref(),
             base_version,
-            &variant,
+            &discovered.variants,
             &files,
-            &discovered,
+            &discovered.files,
             &aggregate_hash,
         )
         .await
@@ -745,7 +838,7 @@ async fn prepare_upload_commit(
     object_id: &str,
     hostname: Option<&str>,
     base_version: u64,
-    variant: &SnapshotVariant,
+    variants: &[SnapshotVariant],
     files: &[SnapshotFileEntry],
     discovered: &[DiscoveredFile],
     aggregate_hash: &str,
@@ -757,7 +850,7 @@ async fn prepare_upload_commit(
         "snapshotHash": aggregate_hash,
         "baseVersion": base_version,
         "customPathRawPaths": [],
-        "variants": [variant],
+        "variants": variants,
         "files": files.iter().map(|f| serde_json::json!({
             "variantId": f.variant_id,
             "rawPath": f.raw_path,
@@ -829,10 +922,16 @@ async fn prepare_upload_commit(
             .upload_url
             .clone()
             .ok_or_else(|| anyhow!("Missing upload URL"))?;
+        if !upload_url.starts_with("https://") {
+            return Err(anyhow!("Refusing non-HTTPS upload URL"));
+        }
         let required_headers = file
             .required_headers
             .clone()
             .ok_or_else(|| anyhow!("Missing required headers"))?;
+        if required_headers.len() != 2 {
+            return Err(anyhow!("Unexpected prepare upload headers"));
+        }
 
         let expected_checksum = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
@@ -1151,7 +1250,6 @@ pub async fn restore_cloud_save(
     let latest = snapshots
         .last()
         .ok_or_else(|| anyhow!("No cloud save snapshot exists for this game"))?;
-
     let manifest = send_checked(
         client
             .get(format!(
@@ -1166,7 +1264,17 @@ pub async fn restore_cloud_save(
     .context("Invalid restore manifest response")?;
 
     // Cross-check manifest against the snapshot summary.
-    let manifest_total_size: u64 = manifest.files.iter().map(|f| f.size_bytes).sum();
+    let manifest_total_size: u64 = manifest.files.iter().try_fold(0u64, |acc, f| {
+        acc.checked_add(f.size_bytes)
+    }).ok_or_else(|| anyhow!("Restore manifest size overflow"))?;
+
+    let mut identities = std::collections::HashSet::new();
+    for f in &manifest.files {
+        if !identities.insert((&f.variant_id, &f.raw_path, &f.relative_path)) {
+            return Err(anyhow!("Restore manifest contains duplicate file identity"));
+        }
+    }
+
     if manifest.snapshot.id != latest.id
         || manifest.snapshot.version != latest.version
         || manifest.files.len() as u64 != latest.file_count
@@ -1244,6 +1352,11 @@ pub async fn restore_cloud_save(
         result.context("Download task panicked")??;
     }
 
+    // Downloads may have outlived the access token; refresh before the
+    // authenticated re-check below.
+    let auth = ensure_fresh_token(&base_client, &auth).await?;
+    let client = hydra_client(&auth)?;
+
     // Confirm the snapshot is still the latest before overwriting local saves.
     let current_snapshots = list_snapshots(&client, shop, object_id).await?;
     let current = current_snapshots.last();
@@ -1282,6 +1395,10 @@ pub async fn restore_cloud_save(
         variant_folders,
     };
 
+    // Only write paths ludusavi designated for this game (same guard as the
+    // desktop launcher's blocked-rule-unavailable).
+    let rules = crate::rules::GameRules::load(object_id, wine_prefix).await?;
+
     let mut restored_files = 0usize;
     let mut skipped_files: Vec<String> = Vec::new();
 
@@ -1291,8 +1408,19 @@ pub async fn restore_cloud_save(
             continue;
         }
 
+        if let Some(rules) = &rules {
+            if !rules.allows_raw_path(&file.raw_path) {
+                skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
+                continue;
+            }
+        }
+
+        // File rules store the full path in rawPath; dir/glob rules store the
+        // root and need relativePath appended after stripping glob segments.
+        let effective_raw = crate::rules::join_restore_path(&file.raw_path, &file.relative_path);
+
         let Some(target) =
-            context.resolve_with_variant(&file.variant_id, &file.raw_path, &file.relative_path)
+            context.resolve_with_variant(&file.variant_id, &effective_raw, "")
         else {
             skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
             continue;
@@ -1304,49 +1432,70 @@ pub async fn restore_cloud_save(
             continue;
         }
 
-        if let Some(parent) = target.parent() {
-            tokio_fs::create_dir_all(parent).await?;
-        }
+        // Per-file failures must not abort the whole restore; collect them.
+        let result: Result<()> = async {
+            if let Some(parent) = target.parent() {
+                tokio_fs::create_dir_all(parent).await?;
+            }
 
-        // Atomic replace: copy to a unique sibling temp file on the same
-        // filesystem, then rename over the target. A blob can be referenced by
-        // multiple manifest files, so the staged blob is never moved.
-        let file_name = target
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "save".to_string());
-        let temp_target = target.with_file_name(format!(
-            ".{file_name}.hydra-restore-{}",
-            std::process::id()
-        ));
-        if let Err(err) = tokio_fs::copy(&blob_path, &temp_target).await {
-            let _ = tokio_fs::remove_file(&temp_target).await;
-            return Err(err).context("Failed to stage save file");
-        }
-        if let Err(err) = tokio_fs::rename(&temp_target, &target).await {
-            let _ = tokio_fs::remove_file(&temp_target).await;
-            return Err(err).context("Failed to replace save file");
-        }
+            // Atomic replace: copy to a unique sibling temp file on the same
+            // filesystem, then rename over the target. A blob can be
+            // referenced by multiple manifest files, so the staged blob is
+            // never moved. File name capped so the temp name stays under
+            // NAME_MAX.
+            let file_name = target
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "save".to_string());
+            let file_name: String = file_name.chars().take(100).collect();
+            let temp_target = target.with_file_name(format!(
+                ".{file_name}.hydra-restore-{}",
+                std::process::id()
+            ));
+            if let Err(err) = tokio_fs::copy(&blob_path, &temp_target).await {
+                let _ = tokio_fs::remove_file(&temp_target).await;
+                return Err(err).context("Failed to stage save file");
+            }
+            if let Err(err) = tokio_fs::rename(&temp_target, &target).await {
+                let _ = tokio_fs::remove_file(&temp_target).await;
+                return Err(err).context("Failed to replace save file");
+            }
 
-        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&file.last_modified_at) {
-            let mtime = filetime::FileTime::from_unix_time(parsed.timestamp(), 0);
-            let _ = filetime::set_file_mtime(&target, mtime);
-        }
+            if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&file.last_modified_at) {
+                let mtime = filetime::FileTime::from_unix_time(parsed.timestamp(), 0);
+                let _ = filetime::set_file_mtime(&target, mtime);
+            }
 
-        restored_files += 1;
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => restored_files += 1,
+            Err(err) => {
+                eprintln!("Failed to restore {}: {err:#}", target.display());
+                skipped_files.push(format!("{}/{}", file.raw_path, file.relative_path));
+            }
+        }
     }
 
-    write_state_logged(
-        shop,
-        object_id,
-        &CloudSaveState {
-            snapshot_id: manifest.snapshot.id.clone(),
-            version: manifest.snapshot.version,
-            aggregate_hash: latest.aggregate_hash.clone(),
-            wine_prefix_path: wine_prefix.map(|p| p.to_string()),
-            updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        },
-    );
+    // Only record the snapshot as current when every file landed. A partial
+    // restore must keep the guard engaged: the local state does not match the
+    // remote snapshot, and auto-sync would otherwise drop the skipped files
+    // from the cloud on the next run.
+    if skipped_files.is_empty() {
+        write_state_logged(
+            shop,
+            object_id,
+            &CloudSaveState {
+                snapshot_id: manifest.snapshot.id.clone(),
+                version: manifest.snapshot.version,
+                aggregate_hash: latest.aggregate_hash.clone(),
+                wine_prefix_path: wine_prefix.map(|p| p.to_string()),
+                updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            },
+        );
+    }
 
     Ok(RestoreResult {
         ok: true,

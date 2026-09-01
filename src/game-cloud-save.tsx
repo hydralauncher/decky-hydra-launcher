@@ -4,6 +4,7 @@ import { Button, ConfirmModal, showModal } from "@decky/ui";
 import { useDate } from "./hooks";
 import { api } from "./hydra-api";
 import { downloadGameArtifact } from "./events";
+import { useCloudSaveGuard } from "./stores";
 import type { Game, GameArtifact } from "./api-types";
 import { toaster } from "@decky/api";
 import { composeToastLogo, formatBytes } from "./helpers";
@@ -53,6 +54,8 @@ export function GameCloudSave({
         game.winePrefixPath,
         response.winePrefixPath
       );
+
+      useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
 
       toaster.toast({
         title: "Backup restored",
