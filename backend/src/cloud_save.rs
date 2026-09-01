@@ -1532,7 +1532,17 @@ pub struct CloudSaveStatus {
 /// Compares the latest remote snapshot with the local sync state. The plugin
 /// cannot block a Steam launch, so callers use this to suppress the post-exit
 /// sync (protecting newer remote data) and prompt a manual restore instead.
-pub async fn check_cloud_save_status(auth_json: &str, object_id: &str, shop: &str) -> Result<CloudSaveStatus> {
+///
+/// Version bookkeeping alone produces false positives when the local state
+/// file is missing (fresh install, lost state) even if this same device
+/// created the remote snapshot — so a version mismatch triggers a content
+/// comparison before reporting the remote as newer.
+pub async fn check_cloud_save_status(
+    auth_json: &str,
+    object_id: &str,
+    shop: &str,
+    wine_prefix: Option<&str>,
+) -> Result<CloudSaveStatus> {
     let auth: Auth = serde_json::from_str(auth_json).context("Invalid auth payload")?;
     let base_client = reqwest::Client::new();
     let auth = ensure_fresh_token(&base_client, &auth).await?;
@@ -1542,16 +1552,49 @@ pub async fn check_cloud_save_status(auth_json: &str, object_id: &str, shop: &st
     let latest = snapshots.last();
     let state = read_state(shop, object_id);
 
-    let remote_newer = match (latest, &state) {
+    let version_says_newer = match (latest, &state) {
         (Some(remote), Some(local)) => {
             remote.version > local.version
                 || (remote.version == local.version
                     && remote.aggregate_hash != local.aggregate_hash)
         }
-        // A remote snapshot exists but this device never synced: remote is newer.
         (Some(_), None) => true,
         (None, _) => false,
     };
+
+    let mut remote_newer = version_says_newer;
+
+    if version_says_newer {
+        if let Some(remote) = latest {
+            // Content check: if the local saves hash to the same aggregate as
+            // the remote snapshot, they are identical regardless of version
+            // bookkeeping.
+            if let Ok(discovered) = discover_files(object_id, shop, wine_prefix).await {
+                let entries: Vec<SnapshotFileEntry> =
+                    discovered.files.iter().map(|f| f.entry.clone()).collect();
+                if let Ok(local_hash) = build_aggregate_hash(&discovered.variants, &entries) {
+                    if local_hash == remote.aggregate_hash {
+                        remote_newer = false;
+
+                        // Self-heal the bookkeeping so later checks skip the
+                        // content comparison.
+                        write_state_logged(
+                            shop,
+                            object_id,
+                            &CloudSaveState {
+                                snapshot_id: remote.id.clone(),
+                                version: remote.version,
+                                aggregate_hash: remote.aggregate_hash.clone(),
+                                wine_prefix_path: wine_prefix.map(|p| p.to_string()),
+                                updated_at: chrono::Utc::now()
+                                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     Ok(CloudSaveStatus {
         ok: true,

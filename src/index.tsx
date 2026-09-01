@@ -117,7 +117,7 @@ const onAppLifetimeNotification = async (
       // remote snapshot is newer — or its state is unknown — we suppress this
       // session's post-exit sync and point the user at a manual restore.
       if (game.automaticCloudSync && auth && hasActiveSubscription) {
-        const check = checkCloudSaveStatus(auth, game.objectId)
+        const check = checkCloudSaveStatus(auth, game.objectId, game.winePrefixPath)
           .then((status) => {
             if (status.auth) {
               useAuthStore.getState().setAuth(status.auth);

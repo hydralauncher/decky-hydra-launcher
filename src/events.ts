@@ -27,6 +27,7 @@ export const restoreCloudSave = callable<
   [Auth, string, string | null],
   CloudSaveRestoreResult
 >("restore_cloud_save");
-export const checkCloudSaveStatus = callable<[Auth, string], CloudSaveStatus>(
-  "check_cloud_save_status"
-);
+export const checkCloudSaveStatus = callable<
+  [Auth, string, string | null],
+  CloudSaveStatus
+>("check_cloud_save_status");

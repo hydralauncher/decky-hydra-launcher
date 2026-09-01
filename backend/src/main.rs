@@ -76,8 +76,9 @@ async fn main() {
         "check-cloud-save-status" => {
             let auth_json = read_auth_from_stdin();
             let object_id = std::env::args().nth(2).expect("no object id given");
+            let wine_prefix = optional_arg(std::env::args().nth(3));
 
-            match cloud_save::check_cloud_save_status(&auth_json, &object_id, "steam").await {
+            match cloud_save::check_cloud_save_status(&auth_json, &object_id, "steam", wine_prefix.as_deref()).await {
                 Ok(result) => println!("{}", serde_json::to_string(&result).unwrap()),
                 Err(err) => {
                     println!("{}", serde_json::json!({ "ok": false, "error": format!("{err:#}") }));
