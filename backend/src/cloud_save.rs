@@ -729,7 +729,9 @@ pub async fn sync_cloud_save(
 
         // Refuse to silently overwrite a remote snapshot this device has not
         // seen. Auto-sync passes force=false; manual sync confirms with the
-        // user first and passes force=true.
+        // user first and passes force=true. A remote matching the launcher's
+        // sync anchor counts as seen: this device produced it, so any local
+        // drift is newer progress.
         if !force {
             if let Some(latest) = snapshots.last() {
                 let state = read_state(shop, object_id);
@@ -741,7 +743,9 @@ pub async fn sync_cloud_save(
                     }
                     None => true,
                 };
-                if remote_newer {
+                let anchor_matches = crate::hydra::get_sync_anchor(object_id, shop)
+                    .is_some_and(|(base_version, _)| base_version == latest.version);
+                if remote_newer && !anchor_matches {
                     return Err(anyhow!("remote-newer"));
                 }
             }
@@ -1629,6 +1633,31 @@ pub async fn check_cloud_save_status(
     let mut remote_newer = version_says_newer;
 
     if version_says_newer {
+        if let Some(remote) = latest {
+            // Fast path: if the remote matches the launcher's sync anchor,
+            // this device produced it and local drift is newer progress.
+            let anchor_matches = crate::hydra::get_sync_anchor(object_id, shop)
+                .is_some_and(|(base_version, _)| base_version == remote.version);
+
+            if anchor_matches {
+                remote_newer = false;
+                write_state_logged(
+                    shop,
+                    object_id,
+                    &CloudSaveState {
+                        snapshot_id: remote.id.clone(),
+                        version: remote.version,
+                        aggregate_hash: remote.aggregate_hash.clone(),
+                        wine_prefix_path: wine_prefix.map(|p| p.to_string()),
+                        updated_at: chrono::Utc::now()
+                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    },
+                );
+            }
+        }
+    }
+
+    if remote_newer {
         if let Some(remote) = latest {
             // Content checks: identical bytes mean "not newer" regardless of
             // version or identity bookkeeping.

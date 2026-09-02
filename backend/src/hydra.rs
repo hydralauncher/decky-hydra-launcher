@@ -147,6 +147,56 @@ pub fn get_custom_paths(object_id: &str, shop: &str) -> Vec<(String, String, Opt
     bindings
 }
 
+/// Latest sync anchor the launcher wrote for this game, as
+/// (baseVersion, baseAggregateHash). The anchor marks the remote snapshot
+/// this device's launcher last synced — if the remote still matches it, any
+/// local drift is newer progress.
+pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<(u64, String)> {
+    let mut snapshot = get_leveldb_snapshot();
+    let mut iter = snapshot.db.new_iter().unwrap();
+
+    let mut best: Option<(u64, String, String)> = None; // (baseVersion, hash, updatedAt)
+
+    while let Some((key_bytes, value_bytes)) = iter.next() {
+        let Ok(key) = String::from_utf8(key_bytes) else { continue };
+        let Some(raw) = key.strip_prefix("!cloud-save-sync-anchors!") else {
+            continue;
+        };
+        let Ok(parts) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+            continue;
+        };
+        // [userId, shop, objectId] (legacy) or [userId, shop, objectId, "environment", envId]
+        if parts.len() < 3 {
+            continue;
+        }
+        if parts[1].as_str() != Some(shop) || parts[2].as_str() != Some(object_id) {
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&value_bytes) else {
+            continue;
+        };
+        let (Some(version), Some(hash), Some(updated_at)) = (
+            value.get("baseVersion").and_then(|v| v.as_u64()),
+            value.get("baseAggregateHash").and_then(|v| v.as_str()),
+            value.get("updatedAt").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+
+        let replace = match &best {
+            Some((_, _, best_updated)) => updated_at > best_updated.as_str(),
+            None => true,
+        };
+        if replace {
+            best = Some((version, hash.to_string(), updated_at.to_string()));
+        }
+    }
+
+    let _ = snapshot.db.close();
+    best.map(|(version, hash, _)| (version, hash))
+}
+
 pub fn get_library() -> String {
     let mut snapshot = get_leveldb_snapshot();
 
