@@ -13,7 +13,7 @@ pub struct ScanContext {
     pub install_dir: Option<String>,
     pub steam_root: Option<PathBuf>,
     pub windows_compat: bool,
-    pub custom_paths: Vec<(String, String)>,
+    pub custom_paths: Vec<(String, String, Option<String>)>,
 }
 
 impl ScanContext {
@@ -143,13 +143,23 @@ impl ScanContext {
     /// subdirectories, and the returned token prefix carries the concrete
     /// folder name.
     fn resolve_prefix(&self, token_prefix: &str) -> Vec<(String, String)> {
-        // Custom save-path bindings resolve verbatim from the stored local path.
-        for (raw_path, local_path) in &self.custom_paths {
-            if token_prefix == raw_path {
-                return vec![(local_path.clone(), raw_path.clone())];
+        // Custom save-path bindings resolve verbatim from the stored local
+        // path, substituting the stored store user id when present.
+        for (raw_path, local_path, store_user_id) in &self.custom_paths {
+            let bound_raw = match store_user_id {
+                Some(id) => raw_path.replace("<storeUserId>", id),
+                None => raw_path.clone(),
+            };
+            let bound_local = match store_user_id {
+                Some(id) => local_path.replace("<storeUserId>", id),
+                None => local_path.clone(),
+            };
+
+            if token_prefix == bound_raw {
+                return vec![(bound_local, bound_raw)];
             }
-            if let Some(rest) = token_prefix.strip_prefix(&format!("{raw_path}/")) {
-                return vec![(format!("{local_path}/{rest}"), token_prefix.to_string())];
+            if let Some(rest) = token_prefix.strip_prefix(&format!("{bound_raw}/")) {
+                return vec![(format!("{bound_local}/{rest}"), token_prefix.to_string())];
             }
         }
 
@@ -225,11 +235,17 @@ pub fn scan_game_saves(ctx: &ScanContext, rules: &GameRules) -> Vec<(PathBuf, St
             RuleKind::Glob => glob_base_path(&rule.raw_path),
             _ => rule.raw_path.clone(),
         };
-        let static_prefix = raw_prefix
-            .split('/')
-            .take_while(|segment| !segment.contains("<storeUserId>"))
-            .collect::<Vec<_>>()
-            .join("/");
+        // Custom bindings are directory roots resolved whole by
+        // resolve_prefix, including any embedded <storeUserId>.
+        let static_prefix = if rule.raw_path.starts_with("<custom>") {
+            raw_prefix
+        } else {
+            raw_prefix
+                .split('/')
+                .take_while(|segment| !segment.contains("<storeUserId>"))
+                .collect::<Vec<_>>()
+                .join("/")
+        };
 
         if static_prefix.is_empty() {
             continue;

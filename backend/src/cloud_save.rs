@@ -546,12 +546,14 @@ async fn discover_files(
     shop: &str,
     wine_prefix: Option<&str>,
 ) -> Result<DiscoveryOutput> {
+    let ctx = crate::scanner::ScanContext::build(object_id, shop, wine_prefix);
+
     // Custom save-path bindings configured in the launcher act as extra rules.
-    let bindings = crate::hydra::get_custom_paths(object_id, shop);
+    let bindings = ctx.custom_paths.clone();
     let rules = match crate::rules::GameRules::load(object_id)? {
-        Some(rules) => rules.with_custom_bindings(&bindings),
+        Some(rules) => rules.with_custom_bindings(&bindings, ctx.windows_compat),
         None if !bindings.is_empty() => {
-            crate::rules::GameRules::empty().with_custom_bindings(&bindings)
+            crate::rules::GameRules::empty().with_custom_bindings(&bindings, ctx.windows_compat)
         }
         None => {
             return Err(anyhow!(
@@ -560,7 +562,6 @@ async fn discover_files(
         }
     };
 
-    let ctx = crate::scanner::ScanContext::build(object_id, shop, wine_prefix);
     let candidates = crate::scanner::scan_game_saves(&ctx, &rules);
 
     let default_variant = build_default_variant(shop, object_id);
@@ -631,11 +632,10 @@ async fn discover_files(
     }
 
     let total: u64 = files.iter().map(|f| f.entry.size_bytes).sum();
-    let mut custom_raw_paths: Vec<String> = files
-        .iter()
-        .filter(|f| f.entry.raw_path.starts_with("<custom>"))
-        .map(|f| f.entry.raw_path.clone())
-        .collect();
+    // Advertise every active binding, not just ones with scanned files —
+    // matches the launcher and keeps remote custom paths restorable.
+    let mut custom_raw_paths: Vec<String> =
+        bindings.iter().map(|(raw_path, _, _)| raw_path.clone()).collect();
     custom_raw_paths.sort();
     custom_raw_paths.dedup();
 
@@ -1112,7 +1112,7 @@ struct RestoreContext {
     steam_root: Option<PathBuf>,
     windows_compat: bool,
     variant_folders: HashMap<String, String>,
-    custom_paths: Vec<(String, String)>,
+    custom_paths: Vec<(String, String, Option<String>)>,
 }
 
 impl RestoreContext {
@@ -1122,8 +1122,16 @@ impl RestoreContext {
 
         // Custom save-path bindings configured in the launcher.
         if raw_path.starts_with("<custom>") {
-            for (bound_raw, local_path) in &self.custom_paths {
-                if raw_path == *bound_raw {
+            for (bound_raw, local_path, store_user_id) in &self.custom_paths {
+                let bound_raw = match store_user_id {
+                    Some(id) => bound_raw.replace("<storeUserId>", id),
+                    None => bound_raw.clone(),
+                };
+                let local_path = match store_user_id {
+                    Some(id) => local_path.replace("<storeUserId>", id),
+                    None => local_path.clone(),
+                };
+                if raw_path == bound_raw {
                     return Some(PathBuf::from(local_path));
                 }
                 if let Some(rest) = raw_path.strip_prefix(&format!("{bound_raw}/")) {
@@ -1236,7 +1244,6 @@ impl RestoreContext {
         }
         self.resolve(raw_path, relative_path)
     }
-
     fn wine_user_profile_root(&self) -> Option<String> {
         let prefix = self.wine_prefix.as_ref()?;
         let name = self.wine_user_name.as_ref()?;
@@ -1444,9 +1451,9 @@ pub async fn restore_cloud_save(
     // cannot be evaluated — abort rather than fail open.
     let bindings = context.custom_paths.clone();
     let rules = match crate::rules::GameRules::load(object_id)? {
-        Some(rules) => rules.with_custom_bindings(&bindings),
+        Some(rules) => rules.with_custom_bindings(&bindings, windows_compat),
         None if !bindings.is_empty() => {
-            crate::rules::GameRules::empty().with_custom_bindings(&bindings)
+            crate::rules::GameRules::empty().with_custom_bindings(&bindings, windows_compat)
         }
         None => {
             return Err(anyhow!("Save rules unavailable for this game; restore aborted"))
@@ -1653,6 +1660,15 @@ pub async fn check_cloud_save_status(
                             remote_blobs.sort_unstable();
 
                             if local_blobs == remote_blobs {
+                                if let Ok(local_hash) =
+                                    build_aggregate_hash(&discovered.variants, &entries)
+                                {
+                                    if local_hash != remote.aggregate_hash {
+                                        eprintln!(
+                                            "status: content equal but identities differ for {object_id}"
+                                        );
+                                    }
+                                }
                                 same = true;
                             } else {
                                 // Diagnostics: which identities diverge.

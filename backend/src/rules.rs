@@ -289,9 +289,28 @@ impl GameRules {
 
     /// Adds the launcher's custom save-path bindings as synthetic dir rules.
     /// Read-only: bindings come from the launcher, the plugin never writes them.
-    pub fn with_custom_bindings(mut self, bindings: &[(String, String)]) -> GameRules {
-        for (raw_path, _) in bindings {
-            if let Some(rule) = compile_rule(raw_path, vec![]) {
+    /// `windows_compat` filters bindings by their platform marker, mirroring
+    /// the launcher's `when: [{os: platform}]` behavior.
+    pub fn with_custom_bindings(
+        mut self,
+        bindings: &[(String, String, Option<String>)],
+        windows_compat: bool,
+    ) -> GameRules {
+        let effective_os = if windows_compat { "<windows>" } else { "<linux>" };
+
+        for (raw_path, _, _) in bindings {
+            // Marker sits right after the <custom> prefix.
+            let marker_ok = raw_path
+                .strip_prefix("<custom>")
+                .is_some_and(|rest| rest.starts_with(effective_os));
+            if !marker_ok {
+                continue;
+            }
+
+            if let Some(mut rule) = compile_rule(raw_path, vec![]) {
+                // Custom bindings are always directory roots; the dot-based
+                // kind heuristic must not reclassify them as files.
+                rule.kind = RuleKind::Dir;
                 self.rules.push(rule);
             }
         }

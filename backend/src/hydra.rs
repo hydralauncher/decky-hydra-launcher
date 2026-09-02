@@ -95,8 +95,9 @@ pub fn get_game_executable_path(object_id: &str, shop: &str) -> Option<String> {
 }
 
 /// Custom save-path bindings the user configured in the launcher, as
-/// (rawPath, localPath) pairs. Read-only: the plugin never writes bindings.
-pub fn get_custom_paths(object_id: &str, shop: &str) -> Vec<(String, String)> {
+/// (rawPath, localPath, storeUserId) triples, longest rawPath first.
+/// Read-only: the plugin never writes bindings.
+pub fn get_custom_paths(object_id: &str, shop: &str) -> Vec<(String, String, Option<String>)> {
     let mut snapshot = get_leveldb_snapshot();
 
     let user_id = snapshot
@@ -124,14 +125,26 @@ pub fn get_custom_paths(object_id: &str, shop: &str) -> Vec<(String, String)> {
         return Vec::new();
     };
 
-    entries
+    let mut bindings: Vec<(String, String, Option<String>)> = entries
         .iter()
+        .filter(|entry| entry.get("tracking").and_then(|t| t.as_str()) != Some("ignored"))
         .filter_map(|entry| {
             let raw_path = entry.get("rawPath")?.as_str()?.to_string();
-            let local_path = entry.get("localPath")?.as_str()?.to_string();
-            Some((raw_path, local_path))
+            let local_path = entry.get("localPath").and_then(|p| p.as_str())?.to_string();
+            if local_path.contains("..") {
+                return None;
+            }
+            let store_user_id = entry
+                .get("storeUserId")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+            Some((raw_path, local_path, store_user_id))
         })
-        .collect()
+        .collect();
+
+    // Longest first so nested bindings resolve before their ancestors.
+    bindings.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    bindings
 }
 
 pub fn get_library() -> String {
