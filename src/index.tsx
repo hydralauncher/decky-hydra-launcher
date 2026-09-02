@@ -5,6 +5,7 @@ import { AppLifetimeNotification } from "@decky/ui/dist/globals/steam-client/Gam
 import styles from "./styles/globals.scss";
 import {
   useAuthStore,
+  useCloudSaveGuard,
   useCurrentGame,
   useLibraryStore,
   useNavigationStore,
@@ -16,10 +17,15 @@ import { WSClient } from "./ws";
 import { composeToastLogo } from "./helpers";
 import { GameCloudSaves } from "./game-cloud-saves";
 import { AuthGuide } from "./auth-guide";
-import { backupAndUpload, getLibrary, isHydraLauncherRunning } from "./events";
-import { getAuth } from "./events";
+import {
+  checkCloudSaveStatus,
+  getAuth,
+  getLibrary,
+  isHydraLauncherRunning,
+  logEvent,
+  syncCloudSave,
+} from "./events";
 import { HydraLogo } from "./components";
-import { formatDate } from "./hooks";
 import type { Game, User } from "./api-types";
 
 function Plugin() {
@@ -65,6 +71,11 @@ function Plugin() {
 let updateInterval: NodeJS.Timeout;
 let lastTick: Date;
 
+// Pre-launch status checks in flight, per objectId. The exit handler awaits
+// the pending check before syncing so a quick launch-then-exit cannot slip
+// past the guard.
+const pendingStatusChecks = new Map<string, Promise<void>>();
+
 const onAppLifetimeNotification = async (
   notification: AppLifetimeNotification
 ) => {
@@ -95,6 +106,10 @@ const onAppLifetimeNotification = async (
   });
 
   if (game) {
+    logEvent(
+      `app ${notification.bRunning ? "launch" : "exit"}: ${game.title} (${game.objectId})`
+    );
+
     if (notification.bRunning) {
       const startedAt = new Date();
       lastTick = startedAt;
@@ -102,6 +117,56 @@ const onAppLifetimeNotification = async (
       setObjectId(game.objectId);
       setRemoteId(game.remoteId);
       setStartedAt(startedAt);
+
+      // Pre-launch guard: the plugin cannot block a Steam launch, so when the
+      // remote snapshot is newer — or its state is unknown — we suppress this
+      // session's post-exit sync and point the user at a manual restore.
+      // Already-flagged games skip the check: the flag only clears through
+      // manual action, so re-checking would just spend API calls.
+      const alreadyFlagged = useCloudSaveGuard
+        .getState()
+        .remoteNewerGames.includes(game.objectId);
+
+      if (game.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
+        const check = checkCloudSaveStatus(auth, game.objectId, game.winePrefixPath)
+          .then((status) => {
+            if (status.auth) {
+              useAuthStore.getState().setAuth(status.auth);
+            }
+            if (status.remoteNewer) {
+              useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+              logEvent(`guard flagged: ${game.objectId} (remote v${status.remoteVersion}, local v${status.localVersion ?? "none"})`);
+              // Skip the toast when the session already ended; the exit
+              // handler shows the authoritative "sync skipped" message.
+              if (useCurrentGame.getState().objectId === game.objectId) {
+                toaster.toast({
+                  title: "Newer cloud save available",
+                  body: `${game.title} has a newer save in the cloud. This session will not sync — restore it from the Hydra plugin to keep the cloud version.`,
+                  logo: composeToastLogo(game.iconUrl),
+                });
+              }
+            } else {
+              useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
+              logEvent(`guard clear: ${game.objectId} (remote v${status.remoteVersion})`);
+            }
+          })
+          .catch((err) => {
+            console.error("Failed to check cloud save status", err);
+            // Fail closed: an unknown remote state suppresses auto-sync too.
+            useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+            toaster.toast({
+              title: "Cloud save status unknown",
+              body: `Could not check the cloud save for ${game.title}. This session will not auto-sync as a precaution.`,
+            });
+          })
+          .finally(() => {
+            if (pendingStatusChecks.get(game.objectId) === check) {
+              pendingStatusChecks.delete(game.objectId);
+            }
+          });
+
+        pendingStatusChecks.set(game.objectId, check);
+      }
 
       console.log("Started at", startedAt);
 
@@ -143,25 +208,72 @@ const onAppLifetimeNotification = async (
 
     const isHydraRunning = await isHydraLauncherRunning();
 
-    // Check if there's any chance for the accessToken to be expired
-    if (
-      game.automaticCloudSync &&
-      auth &&
-      hasActiveSubscription &&
-      !isHydraRunning
-    ) {
-      await backupAndUpload(
-        game.objectId,
-        game.winePrefixPath,
-        auth.accessToken,
-        `Automatic Decky Backup from ${formatDate(new Date(), "en")}`
-      );
+    // Never decide before the launch-time status check settles.
+    await pendingStatusChecks.get(game.objectId)?.catch(() => {});
 
+    const remoteNewer = useCloudSaveGuard
+      .getState()
+      .remoteNewerGames.includes(game.objectId);
+
+    if (remoteNewer) {
       toaster.toast({
-        title: "Backup and upload successful",
-        body: "The game has been backed up and uploaded to the cloud",
+        title: "Cloud sync skipped",
+        body: `${game.title} has a newer save in the cloud. Restore it from the Hydra plugin, or sync manually to overwrite the cloud version.`,
         logo: composeToastLogo(game.iconUrl),
       });
+      return;
+    }
+
+    // Auth and subscription may have changed during the session; re-read them.
+    const freshAuth = useAuthStore.getState().auth;
+    const freshSubscription = useUserStore.getState().hasActiveSubscription;
+
+    if (
+      game.automaticCloudSync &&
+      freshAuth &&
+      freshSubscription &&
+      !isHydraRunning
+    ) {
+      try {
+        logEvent(`auto-sync start: ${game.objectId}`);
+        const result = await syncCloudSave(
+          freshAuth,
+          game.objectId,
+          game.winePrefixPath,
+          false
+        );
+
+        if (result.auth) {
+          useAuthStore.getState().setAuth(result.auth);
+        }
+
+        toaster.toast({
+          title: "Cloud save synced",
+          body: `${game.title} save has been uploaded to the cloud`,
+          logo: composeToastLogo(game.iconUrl),
+        });
+        logEvent(`auto-sync done: ${game.objectId} v${result.version}`);
+      } catch (error: unknown) {
+        console.error("Failed to sync cloud save", error);
+        logEvent(`auto-sync failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
+
+        if (error instanceof Error && error.message.includes("remote-newer")) {
+          // Another device synced since the launch check: suppress auto-sync
+          // and let the user decide.
+          useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+          toaster.toast({
+            title: "Cloud sync skipped",
+            body: `${game.title} has a newer save in the cloud. Restore it from the Hydra plugin, or sync manually to overwrite the cloud version.`,
+            logo: composeToastLogo(game.iconUrl),
+          });
+          return;
+        }
+
+        toaster.toast({
+          title: "Failed to sync cloud save",
+          body: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
     }
   }
 };

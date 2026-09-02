@@ -4,6 +4,7 @@ import { Button, ConfirmModal, showModal } from "@decky/ui";
 import { useDate } from "./hooks";
 import { api } from "./hydra-api";
 import { downloadGameArtifact } from "./events";
+import { useCloudSaveGuard } from "./stores";
 import type { Game, GameArtifact } from "./api-types";
 import { toaster } from "@decky/api";
 import { composeToastLogo, formatBytes } from "./helpers";
@@ -22,6 +23,14 @@ export function GameCloudSave({
   const { formatDate, formatDateTime } = useDate();
 
   const downloadArtifact = useCallback(async () => {
+    if (!game.winePrefixPath) {
+      toaster.toast({
+        title: "Cannot restore backup",
+        body: "This game has no Wine prefix configured",
+      });
+      return;
+    }
+
     toaster.toast({
       title: "Downloading backup...",
       body: "Please wait while we download the backup",
@@ -42,9 +51,11 @@ export function GameCloudSave({
         response.downloadUrl,
         response.objectKey,
         response.homeDir,
-        game.winePrefixPath!,
+        game.winePrefixPath,
         response.winePrefixPath
       );
+
+      useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
 
       toaster.toast({
         title: "Backup restored",

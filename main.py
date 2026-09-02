@@ -1,32 +1,113 @@
-import os
-import subprocess
+import asyncio
 import json
+import os
+import re
 import tempfile
+
 import decky
 
 PLUGIN_DIR = decky.DECKY_PLUGIN_DIR
 BACKEND_PATH = f"{PLUGIN_DIR}/bin/backend"
 
+# Sync/restore can involve large transfers; status checks must stay quick so
+# the exit handler never waits long on them.
+BACKEND_TIMEOUT = 4 * 60 * 60
+STATUS_TIMEOUT = 30
+
+# Only log arguments that cannot carry credentials: plain ids and local paths.
+# URLs (presigned download links) and anything with query strings stay out.
+_SAFE_ARG = re.compile(r"^[A-Za-z0-9_./~ -]{1,200}$")
+
+
+def _loggable_args(args: list[str]) -> str:
+    return " ".join(a if _SAFE_ARG.match(a) else "<redacted>" for a in args)
+
+
+async def _run_backend(args: list[str], stdin_data: str | None = None, timeout: int = BACKEND_TIMEOUT) -> str:
+    # Never log stdin_data (auth tokens) or URLs (presigned credentials).
+    decky.logger.info("backend call: %s", _loggable_args(args))
+
+    process = await asyncio.create_subprocess_exec(
+        BACKEND_PATH, *args,
+        stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(stdin_data.encode() if stdin_data is not None else None),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        decky.logger.error("backend timed out: %s", args[0])
+        raise RuntimeError("Backend timed out")
+
+    out = stdout.decode().strip()
+    err = stderr.decode().strip()
+    if process.returncode != 0:
+        message = None
+        try:
+            payload = json.loads(out)
+            if isinstance(payload, dict):
+                message = payload.get("error")
+        except ValueError:
+            pass
+        decky.logger.error("backend failed: %s: %s (stderr: %s)", args[0], message or "unknown", err)
+        raise RuntimeError(message or err or "Backend failed")
+
+    if err:
+        decky.logger.info("backend stderr (%s): %s", args[0], err)
+    decky.logger.info("backend ok: %s", args[0])
+    return out
+
+
 class Plugin:
     async def get_auth(self):
-        result = subprocess.run([BACKEND_PATH, "get-auth"], capture_output=True, text=True, check=True)
-        return json.loads(result.stdout)
-    
+        return json.loads(await _run_backend(["get-auth"]))
+
     async def get_library(self):
-        result = subprocess.run([BACKEND_PATH, "get-library"], capture_output=True, text=True, check=True)
-        return json.loads(result.stdout)
-    
-    async def backup_and_upload(self, object_id: str, wine_prefix: str, access_token: str, label: str):
-        subprocess.run([BACKEND_PATH, "backup-and-upload", object_id, wine_prefix, access_token, label], capture_output=True, text=True, check=True)
+        return json.loads(await _run_backend(["get-library"]))
 
     async def download_game_artifact(self, object_id: str, download_url: str, object_key: str, home_dir: str, wine_prefix: str, artifact_wine_prefix: str | None):
-        subprocess.run([BACKEND_PATH, "download-game-artifact", object_id, download_url, object_key, home_dir, wine_prefix, artifact_wine_prefix or ""], capture_output=True, text=True, check=True)
+        await _run_backend(["download-game-artifact", object_id, download_url, object_key, home_dir, wine_prefix, artifact_wine_prefix or ""])
 
-    async def check_if_ludusavi_binary_exists(self):
-        result = subprocess.run([BACKEND_PATH, "check-if-ludusavi-binary-exists"], capture_output=True, text=True, check=True)
-        return result.stdout.strip() == "true"
+    async def sync_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None, force: bool):
+        # Auth goes through stdin so tokens never appear in the process list.
+        args = ["sync-cloud-save", object_id, wine_prefix or ""]
+        if force:
+            args.append("force")
+        result = await _run_backend(args, json.dumps(auth))
+        payload = json.loads(result)
+        decky.logger.info(
+            "sync done for %s: version=%s files=%s uploaded=%s skipped=%s",
+            object_id, payload.get("version"), payload.get("fileCount"),
+            payload.get("uploadedFiles"), payload.get("skippedFiles"))
+        return payload
+
+    async def restore_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None):
+        result = await _run_backend(["restore-cloud-save", object_id, wine_prefix or ""], json.dumps(auth))
+        payload = json.loads(result)
+        decky.logger.info(
+            "restore done for %s: version=%s restored=%s skipped=%s",
+            object_id, payload.get("version"), payload.get("restoredFiles"),
+            len(payload.get("skippedFiles", [])))
+        return payload
+
+    async def check_cloud_save_status(self, auth: dict, object_id: str, wine_prefix: str | None):
+        result = await _run_backend(["check-cloud-save-status", object_id, wine_prefix or ""], json.dumps(auth), timeout=STATUS_TIMEOUT)
+        payload = json.loads(result)
+        decky.logger.info(
+            "status for %s: remoteNewer=%s remote=%s local=%s",
+            object_id, payload.get("remoteNewer"), payload.get("remoteVersion"),
+            payload.get("localVersion"))
+        return payload
 
     async def is_hydra_launcher_running(self):
         temp_dir = tempfile.gettempdir()
         lockfile = f"{temp_dir}/hydra-launcher.lock"
         return os.path.exists(lockfile)
+
+    async def log(self, message: str):
+        decky.logger.info("frontend: %s", message)

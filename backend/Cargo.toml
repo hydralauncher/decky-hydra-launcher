@@ -14,7 +14,11 @@ serde_yaml = "*"
 tokio = { version = "1", features = ["full"] }
 regex = "*"
 anyhow = "*"
-uuid = { version = "1", features = ["v4"] }
 tar = "0.4"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 hostname = "0.3"
+sha2 = "0.10"
+base64 = "0.22"
+unicode-normalization = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+filetime = "0.2"
