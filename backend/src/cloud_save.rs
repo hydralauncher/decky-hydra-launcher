@@ -488,6 +488,24 @@ async fn send_checked(builder: reqwest::RequestBuilder) -> Result<reqwest::Respo
     Ok(response)
 }
 
+async fn fetch_restore_manifest(
+    client: &reqwest::Client,
+    snapshot_id: &str,
+) -> Result<RestoreManifestResponse> {
+    send_checked(
+        client
+            .get(format!(
+                "{API_BASE}/profile/cloud-saves/snapshot-restore-manifest"
+            ))
+            .query(&[("snapshotId", snapshot_id)]),
+    )
+    .await
+    .context("Failed to fetch restore manifest")?
+    .json::<RestoreManifestResponse>()
+    .await
+    .context("Invalid restore manifest response")
+}
+
 pub async fn list_snapshots(
     client: &reqwest::Client,
     shop: &str,
@@ -1235,18 +1253,7 @@ pub async fn restore_cloud_save(
     let latest = snapshots
         .last()
         .ok_or_else(|| anyhow!("No cloud save snapshot exists for this game"))?;
-    let manifest = send_checked(
-        client
-            .get(format!(
-                "{API_BASE}/profile/cloud-saves/snapshot-restore-manifest"
-            ))
-            .query(&[("snapshotId", latest.id.as_str())]),
-    )
-    .await
-    .context("Failed to fetch restore manifest")?
-    .json::<RestoreManifestResponse>()
-    .await
-    .context("Invalid restore manifest response")?;
+    let manifest = fetch_restore_manifest(&client, &latest.id).await?;
 
     // Cross-check manifest against the snapshot summary.
     let manifest_total_size: u64 = manifest.files.iter().try_fold(0u64, |acc, f| {
@@ -1573,31 +1580,83 @@ pub async fn check_cloud_save_status(
 
     if version_says_newer {
         if let Some(remote) = latest {
-            // Content check: if the local saves hash to the same aggregate as
-            // the remote snapshot, they are identical regardless of version
-            // bookkeeping.
+            // Content checks: identical bytes mean "not newer" regardless of
+            // version or identity bookkeeping.
             if let Ok(discovered) = discover_files(object_id, shop, wine_prefix).await {
                 let entries: Vec<SnapshotFileEntry> =
                     discovered.files.iter().map(|f| f.entry.clone()).collect();
-                if let Ok(local_hash) = build_aggregate_hash(&discovered.variants, &entries) {
-                    if local_hash == remote.aggregate_hash {
-                        remote_newer = false;
 
-                        // Self-heal the bookkeeping so later checks skip the
-                        // content comparison.
-                        write_state_logged(
-                            shop,
-                            object_id,
-                            &CloudSaveState {
-                                snapshot_id: remote.id.clone(),
-                                version: remote.version,
-                                aggregate_hash: remote.aggregate_hash.clone(),
-                                wine_prefix_path: wine_prefix.map(|p| p.to_string()),
-                                updated_at: chrono::Utc::now()
-                                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                            },
-                        );
+                let mut same = false;
+                if let Ok(local_hash) = build_aggregate_hash(&discovered.variants, &entries) {
+                    same = local_hash == remote.aggregate_hash;
+                }
+
+                if !same {
+                    // Aggregate mismatch can be identity-only (variant or
+                    // rawPath divergence). Compare blob multisets: equal
+                    // content hashes + sizes means the same save data.
+                    match fetch_restore_manifest(&client, &remote.id).await {
+                        Ok(manifest) => {
+                            let mut local_blobs: Vec<(&str, u64)> = entries
+                                .iter()
+                                .map(|f| (f.hash.as_str(), f.size_bytes))
+                                .collect();
+                            let mut remote_blobs: Vec<(&str, u64)> = manifest
+                                .files
+                                .iter()
+                                .map(|f| (f.hash.as_str(), f.size_bytes))
+                                .collect();
+                            local_blobs.sort_unstable();
+                            remote_blobs.sort_unstable();
+
+                            if local_blobs == remote_blobs {
+                                same = true;
+                            } else {
+                                // Diagnostics: which identities diverge.
+                                let remote_ids: std::collections::HashSet<String> = manifest
+                                    .files
+                                    .iter()
+                                    .map(|f| {
+                                        format!("{}/{}:{}", f.raw_path, f.relative_path, f.hash)
+                                    })
+                                    .collect();
+                                let local_ids: std::collections::HashSet<String> = entries
+                                    .iter()
+                                    .map(|f| {
+                                        format!("{}/{}:{}", f.raw_path, f.relative_path, f.hash)
+                                    })
+                                    .collect();
+                                for id in local_ids.difference(&remote_ids).take(5) {
+                                    eprintln!("status mismatch, local only: {id}");
+                                }
+                                for id in remote_ids.difference(&local_ids).take(5) {
+                                    eprintln!("status mismatch, remote only: {id}");
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("status content check failed to fetch manifest: {err:#}");
+                        }
                     }
+                }
+
+                if same {
+                    remote_newer = false;
+
+                    // Self-heal the bookkeeping so later checks skip the
+                    // content comparison.
+                    write_state_logged(
+                        shop,
+                        object_id,
+                        &CloudSaveState {
+                            snapshot_id: remote.id.clone(),
+                            version: remote.version,
+                            aggregate_hash: remote.aggregate_hash.clone(),
+                            wine_prefix_path: wine_prefix.map(|p| p.to_string()),
+                            updated_at: chrono::Utc::now()
+                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        },
+                    );
                 }
             }
         }

@@ -121,7 +121,13 @@ const onAppLifetimeNotification = async (
       // Pre-launch guard: the plugin cannot block a Steam launch, so when the
       // remote snapshot is newer — or its state is unknown — we suppress this
       // session's post-exit sync and point the user at a manual restore.
-      if (game.automaticCloudSync && auth && hasActiveSubscription) {
+      // Already-flagged games skip the check: the flag only clears through
+      // manual action, so re-checking would just spend API calls.
+      const alreadyFlagged = useCloudSaveGuard
+        .getState()
+        .remoteNewerGames.includes(game.objectId);
+
+      if (game.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
         const check = checkCloudSaveStatus(auth, game.objectId, game.winePrefixPath)
           .then((status) => {
             if (status.auth) {
