@@ -1,14 +1,59 @@
 use anyhow::{anyhow, Result};
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::ludusavi::backup_game;
-
-/// Save rules from the ludusavi manifest, so snapshot rawPaths match the
-/// desktop launcher byte-for-byte (rule paths, not fabricated dirnames).
+/// Save rules from the launcher's own manifest index
+/// (`cloud-save-manifest-index.json`), so snapshot rawPaths match the desktop
+/// launcher byte-for-byte.
 
 #[derive(Debug)]
 pub struct GameRules {
     rules: Vec<CompiledRule>,
+}
+
+#[derive(Debug)]
+pub struct CompiledRule {
+    pub raw_path: String,
+    pub regex: regex::Regex,
+    pub kind: RuleKind,
+    pub has_store_user: bool,
+    pub when: Vec<RuleCondition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuleCondition {
+    pub os: Option<String>,
+    pub store: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManifestIndex {
+    version: u32,
+    games: HashMap<String, IndexedGame>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexedGame {
+    #[serde(default)]
+    files: Vec<IndexedRule>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexedRule {
+    raw_path: String,
+    #[serde(default)]
+    when: Vec<RuleCondition>,
+}
+
+fn index_path() -> Result<PathBuf> {
+    Ok(dirs::config_dir()
+        .ok_or_else(|| anyhow!("No config dir"))?
+        .join("hydralauncher")
+        .join("cloud-save-manifest-index.json"))
 }
 
 #[derive(Debug, PartialEq)]
@@ -16,22 +61,6 @@ pub enum RuleKind {
     File,
     Dir,
     Glob,
-}
-
-#[derive(Debug)]
-struct CompiledRule {
-    raw_path: String,
-    regex: regex::Regex,
-    kind: RuleKind,
-    has_store_user: bool,
-}
-
-fn manifest_path() -> Result<PathBuf> {
-    Ok(dirs::config_dir()
-        .ok_or_else(|| anyhow!("No config dir"))?
-        .join("hydralauncher")
-        .join("decky-ludusavi")
-        .join("manifest-https___cdn.losbroxas.org_manifest.yaml"))
 }
 
 // Mirrors hydra native manifest/rules.rs infer_rule_kind.
@@ -53,7 +82,7 @@ fn infer_rule_kind(raw_path: &str) -> RuleKind {
     }
 }
 
-fn compile_rule(raw_path: &str) -> Option<CompiledRule> {
+fn compile_rule(raw_path: &str, when: Vec<RuleCondition>) -> Option<CompiledRule> {
     let kind = infer_rule_kind(raw_path);
     let mut pattern = String::from("^");
     let mut has_store_user = false;
@@ -129,66 +158,122 @@ fn compile_rule(raw_path: &str) -> Option<CompiledRule> {
         regex,
         kind,
         has_store_user,
+        when,
     })
 }
 
-impl GameRules {
-    fn from_manifest_yaml(content: &str, object_id: &str) -> Option<GameRules> {
-        let parsed: serde_yaml::Value = serde_yaml::from_str(content).ok()?;
-        let files = parsed.get(object_id)?.get("files")?.as_mapping()?;
+// ---------------------------------------------------------------------------
+// Applicability (mirrors hydra native path_resolution/applicability.rs)
+// ---------------------------------------------------------------------------
 
-        let rules: Vec<CompiledRule> = files
-            .keys()
-            .filter_map(|key| key.as_str())
-            .filter_map(compile_rule)
+const WINDOWS_ONLY_TOKENS: [&str; 9] = [
+    "<winAppData>",
+    "%APPDATA%",
+    "<winLocalAppData>",
+    "%LOCALAPPDATA%",
+    "<winDocuments>",
+    "<winPublic>",
+    "<winProgramData>",
+    "<winDir>",
+    "<windows>",
+];
+const UNIX_ONLY_TOKENS: [&str; 2] = ["<xdgData>", "<xdgConfig>"];
+
+fn normalized_os(value: &str) -> &str {
+    match value.to_ascii_lowercase().as_str() {
+        "mac" | "macos" | "osx" => "mac",
+        "windows" | "win" => "windows",
+        "linux" => "linux",
+        _ => "unknown",
+    }
+}
+
+impl CompiledRule {
+    pub fn is_applicable(&self, windows_compat: bool, shop: &str) -> bool {
+        let effective_os = if windows_compat { "windows" } else { "linux" };
+
+        let conditions_match = self.when.is_empty()
+            || self.when.iter().any(|condition| {
+                let os_matches = condition
+                    .os
+                    .as_deref()
+                    .map_or(true, |os| normalized_os(os) == effective_os);
+                let store_matches = condition
+                    .store
+                    .as_deref()
+                    .map_or(true, |store| store.eq_ignore_ascii_case(shop));
+                os_matches && store_matches
+            });
+
+        if !conditions_match {
+            return false;
+        }
+
+        let foreign = if effective_os == "windows" {
+            UNIX_ONLY_TOKENS
+                .iter()
+                .any(|token| self.raw_path.contains(token))
+        } else {
+            WINDOWS_ONLY_TOKENS
+                .iter()
+                .any(|token| self.raw_path.contains(token))
+        };
+
+        !foreign
+    }
+
+    pub fn matches(&self, candidate: &str) -> Option<Option<String>> {
+        self.regex.captures(candidate).map(|captures| {
+            if self.has_store_user {
+                captures.name("store_user").map(|m| m.as_str().to_string())
+            } else {
+                None
+            }
+        })
+    }
+}
+
+impl GameRules {
+    /// Loads rules from the launcher's manifest index. The launcher maintains
+    /// this file (24h TTL refresh); the plugin is a companion and requires it.
+    pub fn load(object_id: &str) -> Result<Option<GameRules>> {
+        let path = index_path()?;
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow!("Failed to read cloud save manifest index: {e}"))?;
+        let index: ManifestIndex = serde_json::from_str(&content)
+            .map_err(|e| anyhow!("Invalid cloud save manifest index: {e}"))?;
+        if index.version != 1 {
+            return Err(anyhow!(
+                "Unsupported cloud save manifest index version {}",
+                index.version
+            ));
+        }
+
+        let Some(game) = index.games.get(object_id) else {
+            return Ok(None);
+        };
+
+        let rules: Vec<CompiledRule> = game
+            .files
+            .iter()
+            .filter_map(|rule| compile_rule(&rule.raw_path, rule.when.clone()))
             .collect();
 
         if rules.is_empty() {
-            return None;
+            return Ok(None);
         }
-        Some(GameRules { rules })
+        Ok(Some(GameRules { rules }))
     }
 
-    /// Loads rules for the game from ludusavi's cached manifest, running a
-    /// ludusavi preview first when the cache is missing (which downloads it).
-    pub async fn load(object_id: &str, wine_prefix: Option<&str>) -> Result<Option<GameRules>> {
-        let path = manifest_path()?;
-        if !path.exists() {
-            let _ = backup_game(object_id, None, wine_prefix, true).await;
-        }
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(_) => return Ok(None),
-        };
-
-        Ok(GameRules::from_manifest_yaml(&content, object_id))
-    }
-
-    /// Longest matching rule for a tokenized full file path.
-    pub fn match_rule<'a>(&'a self, tokenized_path: &str) -> Option<RuleMatch<'a>> {
+    pub fn applicable(&self, windows_compat: bool, shop: &str) -> Vec<&CompiledRule> {
         self.rules
             .iter()
-            .filter_map(|rule| {
-                rule.regex
-                    .captures(tokenized_path)
-                    .map(|captures| (rule, captures))
-            })
-            .max_by_key(|(rule, _)| rule.raw_path.len())
-            .map(|(rule, captures)| {
-                let store_user = if rule.has_store_user {
-                    captures
-                        .name("store_user")
-                        .map(|m| m.as_str().to_string())
-                } else {
-                    None
-                };
-                RuleMatch {
-                    raw_path: &rule.raw_path,
-                    kind: &rule.kind,
-                    store_user,
-                }
-            })
+            .filter(|rule| rule.is_applicable(windows_compat, shop))
+            .collect()
     }
 
     /// Whether a manifest-provided rawPath is one of the game's known rules.
@@ -204,6 +289,24 @@ pub struct RuleMatch<'a> {
     pub raw_path: &'a str,
     pub kind: &'a RuleKind,
     pub store_user: Option<String>,
+}
+
+impl GameRules {
+    /// Longest matching rule for a tokenized full file path.
+    pub fn match_rule<'a>(&'a self, tokenized_path: &str) -> Option<RuleMatch<'a>> {
+        self.rules
+            .iter()
+            .filter_map(|rule| {
+                rule.matches(tokenized_path)
+                    .map(|store_user| (rule, store_user))
+            })
+            .max_by_key(|(rule, _)| rule.raw_path.len())
+            .map(|(rule, store_user)| RuleMatch {
+                raw_path: &rule.raw_path,
+                kind: &rule.kind,
+                store_user,
+            })
+    }
 }
 
 /// Splits a rule match into the snapshot (rawPath, relativePath) pair,
@@ -276,7 +379,10 @@ mod tests {
 
     fn rules(raw: &[&str]) -> GameRules {
         GameRules {
-            rules: raw.iter().filter_map(|r| compile_rule(r)).collect(),
+            rules: raw
+                .iter()
+                .filter_map(|r| compile_rule(r, vec![]))
+                .collect(),
         }
     }
 
@@ -338,5 +444,34 @@ mod tests {
         assert!(rules.allows_raw_path("<winAppData>/Game"));
         assert!(!rules.allows_raw_path("<home>/.ssh/authorized_keys"));
         assert!(rules.match_rule("<home>/Other/file.sav").is_none());
+    }
+
+    #[test]
+    fn applicability_matches_reference() {
+        let mut rules = rules(&["<winAppData>/Game", "<xdgData>/game"]);
+        rules.rules[0].when = vec![RuleCondition {
+            os: Some("windows".into()),
+            store: None,
+        }];
+        rules.rules[1].when = vec![RuleCondition {
+            os: Some("linux".into()),
+            store: None,
+        }];
+
+        // Proton (windows compatibility): windows rules only.
+        let proton: Vec<&str> = rules
+            .applicable(true, "steam")
+            .iter()
+            .map(|r| r.raw_path.as_str())
+            .collect();
+        assert_eq!(proton, vec!["<winAppData>/Game"]);
+
+        // Native linux: xdg rules only (windows tokens are foreign).
+        let native: Vec<&str> = rules
+            .applicable(false, "steam")
+            .iter()
+            .map(|r| r.raw_path.as_str())
+            .collect();
+        assert_eq!(native, vec!["<xdgData>/game"]);
     }
 }

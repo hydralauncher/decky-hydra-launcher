@@ -44,6 +44,7 @@ struct Game {
     icon_url: Option<String>,
     wine_prefix_path: Option<String>,
     automatic_cloud_sync: Option<bool>,
+    executable_path: Option<String>,
 }
 
 fn get_leveldb_snapshot() -> Snapshot {
@@ -81,6 +82,16 @@ pub fn get_auth() -> String {
     snapshot.db.close().unwrap();
 
     auth
+}
+
+pub fn get_game_executable_path(object_id: &str, shop: &str) -> Option<String> {
+    let mut snapshot = get_leveldb_snapshot();
+    let key = format!("!games!{shop}:{object_id}");
+    let value = snapshot.db.get(key.as_bytes())?;
+    let _ = snapshot.db.close();
+
+    let game: serde_json::Value = serde_json::from_slice(&value).ok()?;
+    game.get("executablePath")?.as_str().map(|s| s.to_string())
 }
 
 pub fn get_library() -> String {

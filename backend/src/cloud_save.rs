@@ -6,8 +6,34 @@ use std::path::{Path, PathBuf};
 use tokio::fs as tokio_fs;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::ludusavi::backup_game;
 use crate::wine::get_windows_like_user_profile_path;
+
+/// Mirrors the reference install_directory(): the game root is
+/// steamapps/common/<game> when the executable lives there, else the
+/// executable's directory.
+pub(crate) fn install_dir_from_executable(executable_path: Option<&str>) -> Option<String> {
+    let path = executable_path?.replace('\\', "/");
+    let marker = "/steamapps/common/";
+    if let Some(index) = path.to_ascii_lowercase().find(marker) {
+        let start = index + marker.len();
+        let end = path[start..]
+            .find('/')
+            .map(|offset| start + offset)
+            .unwrap_or(path.len());
+        return Some(path[..end].to_string());
+    }
+    path.rsplit_once('/').map(|(parent, _)| parent.to_string())
+}
+
+pub(crate) fn steam_root() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    for candidate in [home.join(".steam/steam"), home.join(".local/share/Steam")] {
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    None
+}
 
 pub const API_BASE: &str = "https://hydra-api-us-east-1.losbroxas.org";
 
@@ -468,26 +494,8 @@ pub async fn list_snapshots(
 }
 
 // ---------------------------------------------------------------------------
-// Discovery: ludusavi preview lists resolved save paths; files stay in place.
+// Discovery: scan local saves via the launcher's own manifest index.
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct LudusaviPreview {
-    #[serde(default)]
-    games: HashMap<String, LudusaviPreviewGame>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LudusaviPreviewGame {
-    #[serde(default)]
-    files: HashMap<String, LudusaviPreviewFile>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LudusaviPreviewFile {
-    #[serde(default)]
-    ignored: bool,
-}
 
 struct DiscoveredFile {
     entry: SnapshotFileEntry,
@@ -499,150 +507,75 @@ pub struct DiscoveryOutput {
     variants: Vec<SnapshotVariant>,
 }
 
-fn tokenize_windows_path(path: &str, user_profile: Option<&str>) -> String {
-    let normalized = path.replace('\\', "/");
-
-    let mut replacements: Vec<(String, String)> = Vec::new();
-    if let Some(profile) = user_profile {
-        let profile = profile.trim_end_matches('/');
-        // <winLocalAppDataLow> does not exist in the ludusavi manifest or the
-        // launcher; LocalLow rules are expressed as <home>/AppData/LocalLow
-        // where <home> is the Windows user profile.
-        replacements.push((format!("{profile}/AppData/LocalLow"), "<home>/AppData/LocalLow".into()));
-        replacements.push((format!("{profile}/AppData/Roaming"), "<winAppData>".into()));
-        replacements.push((format!("{profile}/AppData/Local"), "<winLocalAppData>".into()));
-        replacements.push((format!("{profile}/Documents"), "<winDocuments>".into()));
-    }
-    replacements.push(("C:/users/Public".into(), "<winPublic>".into()));
-    if let Some(home) = dirs::home_dir() {
-        let home = home.to_string_lossy().to_string();
-        // XDG tokens must precede the generic <home> replacement.
-        replacements.push((format!("{home}/.local/share"), "<xdgData>".into()));
-        replacements.push((format!("{home}/.config"), "<xdgConfig>".into()));
-        replacements.push((home, "<home>".into()));
-    }
-
-    // Longest prefix match first.
-    replacements.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-
-    for (prefix, token) in &replacements {
-        if normalized == *prefix {
-            return token.clone();
-        }
-        if let Some(rest) = normalized.strip_prefix(&format!("{prefix}/")) {
-            return format!("{token}/{rest}");
-        }
-    }
-
-    normalized
-}
-
 async fn discover_files(
     object_id: &str,
     shop: &str,
     wine_prefix: Option<&str>,
 ) -> Result<DiscoveryOutput> {
-    let output = backup_game(object_id, None, wine_prefix, true)
-        .await
-        .map_err(|e| anyhow!("Ludusavi backup preview failed: {e}"))?;
+    let rules = crate::rules::GameRules::load(object_id)?
+        .ok_or_else(|| {
+            anyhow!("Save rules unavailable for this game; open Hydra launcher once, then retry")
+        })?;
 
-    let preview: LudusaviPreview =
-        serde_json::from_str(&output).context("Invalid ludusavi preview output")?;
-
-    // Attribute files to exactly one game entry: prefer the one keyed by the
-    // queried id, fall back to a single match, refuse ambiguity.
-    let game = if let Some(game) = preview.games.get(object_id) {
-        game
-    } else if preview.games.len() == 1 {
-        preview.games.values().next().expect("one game")
-    } else if preview.games.is_empty() {
-        return Err(anyhow!("No save files found for this game"));
-    } else {
-        return Err(anyhow!(
-            "Ludusavi matched multiple games for this id; refusing to guess"
-        ));
-    };
-
-    let rules = crate::rules::GameRules::load(object_id, wine_prefix)
-        .await?
-        .ok_or_else(|| anyhow!("Save rules unavailable for this game; sync aborted"))?;
+    let ctx = crate::scanner::ScanContext::build(object_id, shop, wine_prefix);
+    let candidates = crate::scanner::scan_game_saves(&ctx, &rules);
 
     let default_variant = build_default_variant(shop, object_id);
     let mut variants: Vec<SnapshotVariant> = vec![default_variant.clone()];
 
-    let user_profile = wine_prefix.and_then(|prefix| get_windows_like_user_profile_path(prefix).ok());
-    let drive_c = wine_prefix.map(|prefix| format!("{}/drive_c", prefix.trim_end_matches('/')));
-
     let mut files = Vec::new();
-    for (path, info) in &game.files {
-            if info.ignored {
-                continue;
-            }
+    for (real_path, tokenized) in candidates {
+        // A listed file that can no longer be read must not be silently
+        // dropped: committing without it would delete the save on other
+        // devices. Fail retryable so discovery re-runs once.
+        let metadata = tokio_fs::metadata(&real_path).await.map_err(|_| {
+            anyhow!("Save file changed during sync; aborting before commit")
+        })?;
+        if !metadata.is_file() {
+            return Err(anyhow!(
+                "Save file changed during sync; aborting before commit"
+            ));
+        }
 
-            let real_path = PathBuf::from(path);
-            // A listed file that can no longer be read must not be silently
-            // dropped: committing without it would delete the save on other
-            // devices. Fail retryable so discovery re-runs once.
-            let metadata = tokio_fs::metadata(&real_path).await.map_err(|_| {
-                anyhow!("Save file changed during sync; aborting before commit")
-            })?;
-            if !metadata.is_file() {
-                return Err(anyhow!(
-                    "Save file changed during sync; aborting before commit"
-                ));
-            }
+        let size_bytes = metadata.len();
+        let last_modified_at: chrono::DateTime<chrono::Utc> =
+            metadata.modified().unwrap_or(std::time::SystemTime::now()).into();
 
-            let size_bytes = metadata.len();
-            let last_modified_at: chrono::DateTime<chrono::Utc> =
-                metadata.modified().unwrap_or(std::time::SystemTime::now()).into();
+        // Snapshot identity uses the manifest rule path, matching what the
+        // desktop launcher produces for the same file.
+        let rule_match = rules
+            .match_rule(&tokenized)
+            .ok_or_else(|| anyhow!("No save rule matches discovered file: {tokenized}"))?;
 
-            // Express wine-prefix paths as Windows paths before tokenizing so
-            // snapshots stay portable across machines.
-            let portable = match &drive_c {
-                Some(drive_c) if path.starts_with(&format!("{drive_c}/")) => {
-                    format!("C:/{}", &path[drive_c.len() + 1..])
+        let (raw_path, relative_path) =
+            crate::rules::split_rule_match(rule_match.raw_path, rule_match.kind, &tokenized);
+        let variant = match &rule_match.store_user {
+            Some(folder) => {
+                let variant = build_opaque_variant(shop, object_id, folder);
+                if !variants.iter().any(|v| v.variant_id == variant.variant_id) {
+                    variants.push(variant.clone());
                 }
-                _ => path.clone(),
-            };
-            let tokenized = tokenize_windows_path(&portable, user_profile.as_deref());
+                variant
+            }
+            None => default_variant.clone(),
+        };
 
-            // Snapshot identity uses the ludusavi rule path, matching what the
-            // desktop launcher produces for the same file. A file with no
-            // matching rule would get a fabricated identity that restore
-            // refuses — fail instead of committing unrestorable data.
-            let rule_match = rules
-                .match_rule(&tokenized)
-                .ok_or_else(|| anyhow!("No save rule matches discovered file: {tokenized}"))?;
+        let hash = sha256_file_hex(&real_path).await.map_err(|_| {
+            anyhow!("Save file changed during sync; aborting before commit")
+        })?;
 
-            let (raw_path, relative_path) =
-                crate::rules::split_rule_match(rule_match.raw_path, rule_match.kind, &tokenized);
-            let variant = match &rule_match.store_user {
-                Some(folder) => {
-                    let variant = build_opaque_variant(shop, object_id, folder);
-                    if !variants.iter().any(|v| v.variant_id == variant.variant_id) {
-                        variants.push(variant.clone());
-                    }
-                    variant
-                }
-                None => default_variant.clone(),
-            };
-
-            let hash = sha256_file_hex(&real_path).await.map_err(|_| {
-                anyhow!("Save file changed during sync; aborting before commit")
-            })?;
-
-            files.push(DiscoveredFile {
-                entry: SnapshotFileEntry {
-                    variant_id: variant.variant_id,
-                    raw_path,
-                    relative_path,
-                    hash,
-                    size_bytes,
-                    last_modified_at: last_modified_at
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                },
-                source_path: real_path,
-            });
+        files.push(DiscoveredFile {
+            entry: SnapshotFileEntry {
+                variant_id: variant.variant_id,
+                raw_path,
+                relative_path,
+                hash,
+                size_bytes,
+                last_modified_at: last_modified_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            },
+            source_path: real_path,
+        });
     }
 
     if files.is_empty() {
@@ -659,6 +592,7 @@ async fn discover_files(
 
     Ok(DiscoveryOutput { files, variants })
 }
+
 
 async fn sha256_file_hex(path: &Path) -> Result<String> {
     let bytes = tokio_fs::read(path).await?;
@@ -1116,6 +1050,8 @@ struct RestoreContext {
     wine_prefix: Option<String>,
     wine_user_name: Option<String>,
     home_dir: Option<PathBuf>,
+    install_dir: Option<String>,
+    steam_root: Option<PathBuf>,
     variant_folders: HashMap<String, String>,
 }
 
@@ -1157,6 +1093,12 @@ impl RestoreContext {
             self.home_dir
                 .as_ref()
                 .map(|p| format!("{}/.config{rest}", p.to_string_lossy()))
+        } else if let Some(rest) = raw_path.strip_prefix("<base>") {
+            self.install_dir.as_ref().map(|d| format!("{d}{rest}"))
+        } else if let Some(rest) = raw_path.strip_prefix("<root>") {
+            self.steam_root
+                .as_ref()
+                .map(|r| format!("{}{rest}", r.to_string_lossy()))
         } else if raw_path.contains("<storeUserId>") {
             // Resolve against the variant's concrete folder id when known.
             None
@@ -1411,14 +1353,17 @@ pub async fn restore_cloud_save(
         wine_prefix: wine_prefix.map(|p| p.to_string()),
         wine_user_name,
         home_dir: dirs::home_dir(),
+        install_dir: install_dir_from_executable(
+            crate::hydra::get_game_executable_path(object_id, shop).as_deref(),
+        ),
+        steam_root: steam_root(),
         variant_folders,
     };
 
     // Only write paths ludusavi designated for this game (same guard as the
     // desktop launcher's blocked-rule-unavailable). Without the rules the
     // allowlist cannot be evaluated — abort rather than fail open.
-    let rules = crate::rules::GameRules::load(object_id, wine_prefix)
-        .await?
+    let rules = crate::rules::GameRules::load(object_id)?
         .ok_or_else(|| anyhow!("Save rules unavailable for this game; restore aborted"))?;
 
     let mut restored_files = 0usize;
@@ -1708,22 +1653,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tokenizes_windows_profile_paths() {
-        assert_eq!(
-            tokenize_windows_path(
-                "C:/users/deck/AppData/Roaming/Game/save.sav",
-                Some("C:/users/deck")
-            ),
-            "<winAppData>/Game/save.sav"
-        );
-        assert_eq!(
-            tokenize_windows_path("C:/users/Public/Game/save.sav", Some("C:/users/deck")),
-            "<winPublic>/Game/save.sav"
-        );
-        assert_eq!(
-            tokenize_windows_path("D:/other/save.sav", Some("C:/users/deck")),
-            "D:/other/save.sav"
-        );
-    }
 }

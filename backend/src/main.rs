@@ -1,10 +1,9 @@
-use ludusavi::check_if_ludusavi_binary_exists;
 use hydra::{get_auth, get_library, download_game_artifact};
 
 mod cloud_save;
-mod ludusavi;
 mod hydra;
 mod rules;
+mod scanner;
 mod wine;
 
 fn optional_arg(value: Option<String>) -> Option<String> {
@@ -41,10 +40,6 @@ async fn main() {
             let artifact_wine_prefix = std::env::args().nth(7);
 
             download_game_artifact(&object_id, "steam", &download_url, &object_key, &home_dir, Some(&wine_prefix), artifact_wine_prefix).await.unwrap();
-        }
-        "check-if-ludusavi-binary-exists" => {
-            let exists = check_if_ludusavi_binary_exists();
-            println!("{}", exists);
         }
         "sync-cloud-save" => {
             let auth_json = read_auth_from_stdin();
