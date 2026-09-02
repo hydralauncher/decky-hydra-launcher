@@ -753,6 +753,61 @@ pub async fn sync_cloud_save(
 
         let base_version = snapshots.last().map(|s| s.version).unwrap_or(0);
 
+        // No-op short-circuit: identical content already lives in the remote
+        // snapshot — skip prepare/upload/commit entirely. Aggregate equality
+        // first; on mismatch, compare blob multisets to catch identity-only
+        // drift (e.g. environment path changes).
+        if let Some(remote) = snapshots.last() {
+            let mut same = aggregate_hash == remote.aggregate_hash;
+            if !same {
+                match fetch_restore_manifest(&client, &remote.id).await {
+                    Ok(manifest) => {
+                        let mut local_blobs: Vec<(&str, u64)> = files
+                            .iter()
+                            .map(|f| (f.hash.as_str(), f.size_bytes))
+                            .collect();
+                        let mut remote_blobs: Vec<(&str, u64)> = manifest
+                            .files
+                            .iter()
+                            .map(|f| (f.hash.as_str(), f.size_bytes))
+                            .collect();
+                        local_blobs.sort_unstable();
+                        remote_blobs.sort_unstable();
+                        same = local_blobs == remote_blobs;
+                    }
+                    Err(err) => {
+                        eprintln!("sync no-op check failed to fetch manifest: {err:#}");
+                    }
+                }
+            }
+
+            if same {
+                eprintln!("sync: local content matches remote v{}, skipping", remote.version);
+                write_state_logged(
+                    shop,
+                    object_id,
+                    &CloudSaveState {
+                        snapshot_id: remote.id.clone(),
+                        version: remote.version,
+                        aggregate_hash: remote.aggregate_hash.clone(),
+                        wine_prefix_path: wine_prefix.map(|p| p.to_string()),
+                        updated_at: chrono::Utc::now()
+                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    },
+                );
+                return Ok(SyncResult {
+                    ok: true,
+                    snapshot_id: remote.id.clone(),
+                    version: remote.version,
+                    file_count: files.len() as u64,
+                    total_size_bytes: total_size,
+                    uploaded_files: 0,
+                    skipped_files: files.len(),
+                    auth: Some(auth),
+                });
+            }
+        }
+
         match prepare_upload_commit(
             &client,
             shop,
@@ -1351,66 +1406,6 @@ pub async fn restore_cloud_save(
     .await
     .context("Invalid download URLs response")?;
 
-    let temp = tempfile::tempdir().context("Failed to create temp dir")?;
-
-    // Download blobs, deduplicated by content hash. Only hashes referenced by
-    // the already-validated manifest are fetched; the hash becomes a path
-    // component, so anything else is rejected.
-    let manifest_hashes: std::collections::HashSet<&str> =
-        manifest.files.iter().map(|f| f.hash.as_str()).collect();
-    let mut blob_urls: HashMap<String, (String, u64)> = HashMap::new();
-    for file in &download_files {
-        if !is_valid_hash(&file.hash) || !manifest_hashes.contains(file.hash.as_str()) {
-            continue;
-        }
-        blob_urls
-            .entry(file.hash.clone())
-            .or_insert_with(|| (file.download_url.clone(), file.size_bytes));
-    }
-
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
-    let mut join_set = tokio::task::JoinSet::new();
-    let download_client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(1800))
-        .build()?;
-
-    for (hash, (url, _size)) in &blob_urls {
-        let permit = semaphore.clone().acquire_owned().await?;
-        let client = download_client.clone();
-        let dest = temp.path().join(hash);
-        let url = url.clone();
-        let hash = hash.clone();
-        join_set.spawn(async move {
-            let _permit = permit;
-            let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
-            let actual = format!("{:x}", Sha256::digest(&bytes));
-            if actual != hash {
-                return Err(anyhow!("Downloaded blob failed hash verification"));
-            }
-            tokio_fs::write(&dest, &bytes).await?;
-            Ok::<(), anyhow::Error>(())
-        });
-    }
-
-    while let Some(result) = join_set.join_next().await {
-        result.context("Download task panicked")??;
-    }
-
-    // Downloads may have outlived the access token; refresh before the
-    // authenticated re-check below.
-    let auth = ensure_fresh_token(&base_client, &auth).await?;
-    let client = hydra_client(&auth)?;
-
-    // Confirm the snapshot is still the latest before overwriting local saves.
-    let current_snapshots = list_snapshots(&client, shop, object_id).await?;
-    let current = current_snapshots.last();
-    if current.map(|s| (s.id.as_str(), s.version)) != Some((latest.id.as_str(), latest.version)) {
-        return Err(anyhow!(
-            "Cloud save snapshot changed during restore; aborting to avoid stale data"
-        ));
-    }
-
     let wine_user_name = wine_prefix.and_then(|prefix| {
         get_windows_like_user_profile_path(prefix)
             .ok()
@@ -1464,6 +1459,99 @@ pub async fn restore_cloud_save(
         }
     };
 
+    // Incremental restore: files already on disk with matching content are
+    // kept as-is and their blobs are not downloaded.
+    let mut current_files: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut needed_hashes: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (index, file) in manifest.files.iter().enumerate() {
+        if !is_safe_manifest_file(file) || !rules.allows_raw_path(&file.raw_path) {
+            needed_hashes.insert(&file.hash);
+            continue;
+        }
+        let effective_raw = crate::rules::join_restore_path(&file.raw_path, &file.relative_path);
+        let target = context.resolve_with_variant(&file.variant_id, &effective_raw, "");
+        let already_current = match target {
+            Some(target) if target.is_file() => {
+                matches!(sha256_file_hex(&target).await, Ok(hash) if hash == file.hash)
+            }
+            _ => false,
+        };
+        if already_current {
+            current_files.insert(index);
+        } else {
+            needed_hashes.insert(&file.hash);
+        }
+    }
+    eprintln!(
+        "restore: {} of {} files already current locally",
+        current_files.len(),
+        manifest.files.len()
+    );
+
+    let temp = tempfile::tempdir().context("Failed to create temp dir")?;
+
+    // Download blobs, deduplicated by content hash. Only hashes referenced by
+    // the already-validated manifest are fetched; the hash becomes a path
+    // component, so anything else is rejected.
+    let manifest_hashes: std::collections::HashSet<&str> =
+        manifest.files.iter().map(|f| f.hash.as_str()).collect();
+    let mut blob_urls: HashMap<String, (String, u64)> = HashMap::new();
+    for file in &download_files {
+        if !is_valid_hash(&file.hash)
+            || !manifest_hashes.contains(file.hash.as_str())
+            || !needed_hashes.contains(file.hash.as_str())
+        {
+            continue;
+        }
+        blob_urls
+            .entry(file.hash.clone())
+            .or_insert_with(|| (file.download_url.clone(), file.size_bytes));
+    }
+
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
+    let mut join_set = tokio::task::JoinSet::new();
+    let download_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()?;
+
+    for (hash, (url, _size)) in &blob_urls {
+        let permit = semaphore.clone().acquire_owned().await?;
+        let client = download_client.clone();
+        let dest = temp.path().join(hash);
+        let url = url.clone();
+        let hash = hash.clone();
+        join_set.spawn(async move {
+            let _permit = permit;
+            let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
+            let actual = format!("{:x}", Sha256::digest(&bytes));
+            if actual != hash {
+                return Err(anyhow!("Downloaded blob failed hash verification"));
+            }
+            tokio_fs::write(&dest, &bytes).await?;
+            Ok::<(), anyhow::Error>(())
+        });
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        result.context("Download task panicked")??;
+    }
+
+    // Downloads may have outlived the access token; refresh before the
+    // authenticated re-check below.
+    let auth = ensure_fresh_token(&base_client, &auth).await?;
+    let client = hydra_client(&auth)?;
+
+    // Confirm the snapshot is still the latest before overwriting local saves.
+    let current_snapshots = list_snapshots(&client, shop, object_id).await?;
+    let current = current_snapshots.last();
+    if current.map(|s| (s.id.as_str(), s.version)) != Some((latest.id.as_str(), latest.version)) {
+        return Err(anyhow!(
+            "Cloud save snapshot changed during restore; aborting to avoid stale data"
+        ));
+    }
+
+
     let mut restored_files = 0usize;
     let mut skipped_files: Vec<String> = Vec::new();
 
@@ -1473,7 +1561,12 @@ pub async fn restore_cloud_save(
         manifest.snapshot.version
     );
 
-    for file in &manifest.files {
+    for (index, file) in manifest.files.iter().enumerate() {
+        if current_files.contains(&index) {
+            restored_files += 1;
+            continue;
+        }
+
         let display = || format!("{}/{}", file.raw_path, file.relative_path);
 
         if !is_safe_manifest_file(file) {
