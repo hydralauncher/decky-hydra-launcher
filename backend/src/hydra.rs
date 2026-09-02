@@ -94,6 +94,46 @@ pub fn get_game_executable_path(object_id: &str, shop: &str) -> Option<String> {
     game.get("executablePath")?.as_str().map(|s| s.to_string())
 }
 
+/// Custom save-path bindings the user configured in the launcher, as
+/// (rawPath, localPath) pairs. Read-only: the plugin never writes bindings.
+pub fn get_custom_paths(object_id: &str, shop: &str) -> Vec<(String, String)> {
+    let mut snapshot = get_leveldb_snapshot();
+
+    let user_id = snapshot
+        .db
+        .get(b"user")
+        .and_then(|value| {
+            let parsed: serde_json::Value = serde_json::from_slice(&value).ok()?;
+            parsed.get("id")?.as_str().map(|s| s.to_string())
+        });
+
+    let Some(user_id) = user_id else {
+        let _ = snapshot.db.close();
+        return Vec::new();
+    };
+
+    let key = format!(
+        "!cloud-save-custom-paths!{}",
+        serde_json::json!([user_id, shop, object_id])
+    );
+    let value = snapshot.db.get(key.as_bytes());
+    let _ = snapshot.db.close();
+
+    let Some(value) = value else { return Vec::new() };
+    let Ok(entries) = serde_json::from_slice::<Vec<serde_json::Value>>(&value) else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let raw_path = entry.get("rawPath")?.as_str()?.to_string();
+            let local_path = entry.get("localPath")?.as_str()?.to_string();
+            Some((raw_path, local_path))
+        })
+        .collect()
+}
+
 pub fn get_library() -> String {
     let mut snapshot = get_leveldb_snapshot();
 

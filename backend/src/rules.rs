@@ -287,6 +287,21 @@ impl GameRules {
         Ok(Some(GameRules { rules }))
     }
 
+    /// Adds the launcher's custom save-path bindings as synthetic dir rules.
+    /// Read-only: bindings come from the launcher, the plugin never writes them.
+    pub fn with_custom_bindings(mut self, bindings: &[(String, String)]) -> GameRules {
+        for (raw_path, _) in bindings {
+            if let Some(rule) = compile_rule(raw_path, vec![]) {
+                self.rules.push(rule);
+            }
+        }
+        self
+    }
+
+    pub fn empty() -> GameRules {
+        GameRules { rules: Vec::new() }
+    }
+
     pub fn applicable(&self, windows_compat: bool, shop: &str) -> Vec<&CompiledRule> {
         self.rules
             .iter()

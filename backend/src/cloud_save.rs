@@ -538,6 +538,7 @@ struct DiscoveredFile {
 pub struct DiscoveryOutput {
     files: Vec<DiscoveredFile>,
     variants: Vec<SnapshotVariant>,
+    custom_raw_paths: Vec<String>,
 }
 
 async fn discover_files(
@@ -545,10 +546,19 @@ async fn discover_files(
     shop: &str,
     wine_prefix: Option<&str>,
 ) -> Result<DiscoveryOutput> {
-    let rules = crate::rules::GameRules::load(object_id)?
-        .ok_or_else(|| {
-            anyhow!("Save rules unavailable for this game; open Hydra launcher once, then retry")
-        })?;
+    // Custom save-path bindings configured in the launcher act as extra rules.
+    let bindings = crate::hydra::get_custom_paths(object_id, shop);
+    let rules = match crate::rules::GameRules::load(object_id)? {
+        Some(rules) => rules.with_custom_bindings(&bindings),
+        None if !bindings.is_empty() => {
+            crate::rules::GameRules::empty().with_custom_bindings(&bindings)
+        }
+        None => {
+            return Err(anyhow!(
+                "Save rules unavailable for this game; open Hydra launcher once, then retry"
+            ))
+        }
+    };
 
     let ctx = crate::scanner::ScanContext::build(object_id, shop, wine_prefix);
     let candidates = crate::scanner::scan_game_saves(&ctx, &rules);
@@ -621,6 +631,14 @@ async fn discover_files(
     }
 
     let total: u64 = files.iter().map(|f| f.entry.size_bytes).sum();
+    let mut custom_raw_paths: Vec<String> = files
+        .iter()
+        .filter(|f| f.entry.raw_path.starts_with("<custom>"))
+        .map(|f| f.entry.raw_path.clone())
+        .collect();
+    custom_raw_paths.sort();
+    custom_raw_paths.dedup();
+
     eprintln!(
         "discovery: {} files, {} bytes, {} variants",
         files.len(),
@@ -628,7 +646,7 @@ async fn discover_files(
         variants.len()
     );
 
-    Ok(DiscoveryOutput { files, variants })
+    Ok(DiscoveryOutput { files, variants, custom_raw_paths })
 }
 
 
@@ -739,7 +757,7 @@ pub async fn sync_cloud_save(
             base_version,
             &discovered.variants,
             &files,
-            &discovered.files,
+            &discovered,
             &aggregate_hash,
         )
         .await
@@ -817,7 +835,7 @@ async fn prepare_upload_commit(
     base_version: u64,
     variants: &[SnapshotVariant],
     files: &[SnapshotFileEntry],
-    discovered: &[DiscoveredFile],
+    discovered: &DiscoveryOutput,
     aggregate_hash: &str,
 ) -> Result<(CommitSnapshotResponse, usize, usize)> {
     let mut payload = serde_json::json!({
@@ -826,7 +844,7 @@ async fn prepare_upload_commit(
         "platform": "linux",
         "snapshotHash": aggregate_hash,
         "baseVersion": base_version,
-        "customPathRawPaths": [],
+        "customPathRawPaths": discovered.custom_raw_paths,
         "variants": variants,
         "files": files.iter().map(|f| serde_json::json!({
             "variantId": f.variant_id,
@@ -862,6 +880,7 @@ async fn prepare_upload_commit(
     }
 
     let source_by_key: HashMap<String, &DiscoveredFile> = discovered
+        .files
         .iter()
         .map(|f| {
             (
@@ -871,6 +890,7 @@ async fn prepare_upload_commit(
         })
         .collect();
     let source_by_blob: HashMap<String, &DiscoveredFile> = discovered
+        .files
         .iter()
         .map(|f| (format!("{}\u{0}{}", f.entry.hash, f.entry.size_bytes), f))
         .collect();
@@ -1004,7 +1024,7 @@ async fn prepare_upload_commit(
     // Re-hash every proposed file before commit — including ones the server
     // marked "skip". A file that changed since discovery would otherwise be
     // committed with a stale identity while the local change stays unpreserved.
-    for source in discovered {
+    for source in &discovered.files {
         let actual_hash = sha256_file_hex(&source.source_path).await.map_err(|_| {
             anyhow!("Save file changed during sync; aborting before commit")
         })?;
@@ -1092,12 +1112,26 @@ struct RestoreContext {
     steam_root: Option<PathBuf>,
     windows_compat: bool,
     variant_folders: HashMap<String, String>,
+    custom_paths: Vec<(String, String)>,
 }
 
 impl RestoreContext {
     fn resolve(&self, raw_path: &str, relative_path: &str) -> Option<PathBuf> {
         let raw_path = raw_path.replace('\\', "/");
         let profile_root = self.wine_user_profile_root();
+
+        // Custom save-path bindings configured in the launcher.
+        if raw_path.starts_with("<custom>") {
+            for (bound_raw, local_path) in &self.custom_paths {
+                if raw_path == *bound_raw {
+                    return Some(PathBuf::from(local_path));
+                }
+                if let Some(rest) = raw_path.strip_prefix(&format!("{bound_raw}/")) {
+                    return Some(PathBuf::from(format!("{local_path}/{rest}")));
+                }
+            }
+            return None;
+        }
 
         let base = if let Some(rest) = raw_path.strip_prefix("<winAppData>") {
             profile_root.map(|p| format!("{p}/AppData/Roaming{rest}"))
@@ -1402,13 +1436,22 @@ pub async fn restore_cloud_save(
         steam_root: steam_root(executable_path.as_deref()),
         windows_compat,
         variant_folders,
+        custom_paths: crate::hydra::get_custom_paths(object_id, shop),
     };
 
-    // Only write paths ludusavi designated for this game (same guard as the
-    // desktop launcher's blocked-rule-unavailable). Without the rules the
-    // allowlist cannot be evaluated — abort rather than fail open.
-    let rules = crate::rules::GameRules::load(object_id)?
-        .ok_or_else(|| anyhow!("Save rules unavailable for this game; restore aborted"))?;
+    // Only write paths designated for this game: manifest rules plus the
+    // launcher's custom save-path bindings. Without rules the allowlist
+    // cannot be evaluated — abort rather than fail open.
+    let bindings = context.custom_paths.clone();
+    let rules = match crate::rules::GameRules::load(object_id)? {
+        Some(rules) => rules.with_custom_bindings(&bindings),
+        None if !bindings.is_empty() => {
+            crate::rules::GameRules::empty().with_custom_bindings(&bindings)
+        }
+        None => {
+            return Err(anyhow!("Save rules unavailable for this game; restore aborted"))
+        }
+    };
 
     let mut restored_files = 0usize;
     let mut skipped_files: Vec<String> = Vec::new();

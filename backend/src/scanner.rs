@@ -13,6 +13,7 @@ pub struct ScanContext {
     pub install_dir: Option<String>,
     pub steam_root: Option<PathBuf>,
     pub windows_compat: bool,
+    pub custom_paths: Vec<(String, String)>,
 }
 
 impl ScanContext {
@@ -30,6 +31,7 @@ impl ScanContext {
             install_dir: install_dir_from_executable(executable_path.as_deref()),
             steam_root: steam_root(executable_path.as_deref()),
             windows_compat,
+            custom_paths: crate::hydra::get_custom_paths(object_id, shop),
         }
     }
 
@@ -141,6 +143,16 @@ impl ScanContext {
     /// subdirectories, and the returned token prefix carries the concrete
     /// folder name.
     fn resolve_prefix(&self, token_prefix: &str) -> Vec<(String, String)> {
+        // Custom save-path bindings resolve verbatim from the stored local path.
+        for (raw_path, local_path) in &self.custom_paths {
+            if token_prefix == raw_path {
+                return vec![(local_path.clone(), raw_path.clone())];
+            }
+            if let Some(rest) = token_prefix.strip_prefix(&format!("{raw_path}/")) {
+                return vec![(format!("{local_path}/{rest}"), token_prefix.to_string())];
+            }
+        }
+
         let segments: Vec<&str> = token_prefix.split('/').collect();
 
         let mut current: Vec<(String, String)> = self
