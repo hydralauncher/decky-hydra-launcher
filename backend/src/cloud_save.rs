@@ -25,9 +25,24 @@ pub(crate) fn install_dir_from_executable(executable_path: Option<&str>) -> Opti
     path.rsplit_once('/').map(|(parent, _)| parent.to_string())
 }
 
-pub(crate) fn steam_root() -> Option<PathBuf> {
+/// Steam installation root: derived from the game's executable when it lives
+/// in a steamapps tree (covers SD-card/secondary libraries), else the default
+/// home locations.
+pub(crate) fn steam_root(executable_path: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = executable_path {
+        let path = path.replace('\\', "/");
+        let marker = "/steamapps/";
+        if let Some(index) = path.to_ascii_lowercase().find(marker) {
+            return Some(PathBuf::from(&path[..index]));
+        }
+    }
+
     let home = dirs::home_dir()?;
-    for candidate in [home.join(".steam/steam"), home.join(".local/share/Steam")] {
+    for candidate in [
+        home.join(".steam/steam"),
+        home.join(".steam/root"),
+        home.join(".local/share/Steam"),
+    ] {
         if candidate.is_dir() {
             return Some(candidate);
         }
@@ -543,12 +558,17 @@ async fn discover_files(
 
         // Snapshot identity uses the manifest rule path, matching what the
         // desktop launcher produces for the same file.
-        let rule_match = rules
-            .match_rule(&tokenized)
-            .ok_or_else(|| anyhow!("No save rule matches discovered file: {tokenized}"))?;
+            let rule_match = rules
+                .match_rule(&tokenized, ctx.windows_compat, shop)
+                .ok_or_else(|| anyhow!("No save rule matches discovered file: {tokenized}"))?;
 
-        let (raw_path, relative_path) =
-            crate::rules::split_rule_match(rule_match.raw_path, rule_match.kind, &tokenized);
+            let (raw_path, relative_path) =
+                crate::rules::split_rule_match(
+                    rule_match.raw_path,
+                    rule_match.kind,
+                    &tokenized,
+                    rule_match.store_user.as_deref(),
+                );
         let variant = match &rule_match.store_user {
             Some(folder) => {
                 let variant = build_opaque_variant(shop, object_id, folder);
@@ -1052,6 +1072,7 @@ struct RestoreContext {
     home_dir: Option<PathBuf>,
     install_dir: Option<String>,
     steam_root: Option<PathBuf>,
+    windows_compat: bool,
     variant_folders: HashMap<String, String>,
 }
 
@@ -1074,11 +1095,22 @@ impl RestoreContext {
             self.wine_prefix
                 .as_ref()
                 .map(|p| format!("{p}/drive_c/ProgramData{rest}"))
+        } else if let Some(rest) = raw_path
+            .strip_prefix("<winDir>")
+            .or_else(|| raw_path.strip_prefix("<windows>"))
+        {
+            self.wine_prefix
+                .as_ref()
+                .map(|p| format!("{p}/drive_c/windows{rest}"))
+        } else if let Some(rest) = raw_path.strip_prefix("<osUserName>") {
+            self.wine_user_name
+                .as_ref()
+                .map(|n| format!("{n}{rest}"))
         } else if let Some(rest) = raw_path.strip_prefix("<home>") {
-            // In manifest rules <home> means the Windows user profile when the
-            // path targets AppData; on native games (no Wine prefix) ludusavi
-            // maps those same paths onto the Linux home directory instead.
-            if rest.starts_with("/AppData/") && self.wine_prefix.is_some() {
+            // Under Proton <home> is the wine user profile (mirrors the
+            // scanner and the reference launcher); on native games it is the
+            // linux home directory.
+            if self.windows_compat {
                 profile_root.map(|p| format!("{p}{rest}"))
             } else {
                 self.home_dir
@@ -1349,14 +1381,19 @@ pub async fn restore_cloud_save(
         })
         .collect();
 
+    let executable_path = crate::hydra::get_game_executable_path(object_id, shop);
+    let windows_compat = wine_prefix.is_some()
+        && executable_path
+            .as_deref()
+            .is_some_and(|p| p.to_ascii_lowercase().ends_with(".exe"));
+
     let context = RestoreContext {
         wine_prefix: wine_prefix.map(|p| p.to_string()),
         wine_user_name,
         home_dir: dirs::home_dir(),
-        install_dir: install_dir_from_executable(
-            crate::hydra::get_game_executable_path(object_id, shop).as_deref(),
-        ),
-        steam_root: steam_root(),
+        install_dir: install_dir_from_executable(executable_path.as_deref()),
+        steam_root: steam_root(executable_path.as_deref()),
+        windows_compat,
         variant_folders,
     };
 

@@ -98,35 +98,53 @@ fn compile_rule(raw_path: &str, when: Vec<RuleCondition>) -> Option<CompiledRule
                     pattern.push_str("[^/]*");
                 }
             }
-            '?' => pattern.push('.'),
+            '?' => pattern.push_str("[^/]"),
             '[' => {
                 // Character class, ludusavi globset semantics: [!...] negates.
+                // Unterminated class falls back to a literal bracket.
                 let mut class = String::from("[");
+                let mut closed = false;
                 if chars.peek() == Some(&'!') {
                     chars.next();
                     class.push('^');
                 }
                 for next in chars.by_ref() {
                     if next == ']' {
+                        closed = true;
                         break;
                     }
                     class.push(next);
                 }
-                class.push(']');
-                pattern.push_str(&class);
+                if closed {
+                    class.push(']');
+                    pattern.push_str(&class);
+                } else {
+                    pattern.push_str(r"\[");
+                    pattern.push_str(&regex::escape(&class[1..]));
+                }
             }
             '{' => {
-                // Brace alternation: {a,b} matches a or b.
+                // Brace alternation: {a,b} matches a or b. Unterminated brace
+                // falls back to a literal.
                 let mut group = String::from("(?:");
+                let mut closed = false;
                 for next in chars.by_ref() {
                     match next {
-                        '}' => break,
+                        '}' => {
+                            closed = true;
+                            break;
+                        }
                         ',' => group.push('|'),
                         other => group.push_str(&regex::escape(&other.to_string())),
                     }
                 }
-                group.push(')');
-                pattern.push_str(&group);
+                if closed {
+                    group.push(')');
+                    pattern.push_str(&group);
+                } else {
+                    pattern.push_str(r"\{");
+                    pattern.push_str(&group[3..].replace('|', ","));
+                }
             }
             '<' => {
                 let mut token = String::new();
@@ -292,10 +310,17 @@ pub struct RuleMatch<'a> {
 }
 
 impl GameRules {
-    /// Longest matching rule for a tokenized full file path.
-    pub fn match_rule<'a>(&'a self, tokenized_path: &str) -> Option<RuleMatch<'a>> {
+    /// Longest matching rule for a tokenized full file path, restricted to
+    /// rules applicable in this environment.
+    pub fn match_rule<'a>(
+        &'a self,
+        tokenized_path: &str,
+        windows_compat: bool,
+        shop: &str,
+    ) -> Option<RuleMatch<'a>> {
         self.rules
             .iter()
+            .filter(|rule| rule.is_applicable(windows_compat, shop))
             .filter_map(|rule| {
                 rule.matches(tokenized_path)
                     .map(|store_user| (rule, store_user))
@@ -313,10 +338,13 @@ impl GameRules {
 /// mirroring the desktop launcher: file rules keep the full rule path with
 /// the file name as relativePath; dir rules use the rule path as root; glob
 /// rules keep the pattern and use the path relative to the glob base.
+/// `store_user` is the concrete folder captured for <storeUserId>, used to
+/// align the base with the tokenized path before stripping.
 pub fn split_rule_match(
     rule_raw_path: &str,
     kind: &RuleKind,
     tokenized_path: &str,
+    store_user: Option<&str>,
 ) -> (String, String) {
     let file_name = || {
         tokenized_path
@@ -326,16 +354,25 @@ pub fn split_rule_match(
             .to_string()
     };
 
+    // Align rule base with the concrete path: the captured folder replaces
+    // the token so prefix stripping works on real directory names.
+    let concretize = |path: &str| -> String {
+        match store_user {
+            Some(folder) => path.replace("<storeUserId>", folder),
+            None => path.to_string(),
+        }
+    };
+
     match kind {
-        RuleKind::File if rule_raw_path == tokenized_path => {
+        RuleKind::File if concretize(rule_raw_path) == tokenized_path => {
             (rule_raw_path.to_string(), file_name())
         }
         RuleKind::Dir | RuleKind::Glob => {
             let base_owned;
             let base = match kind {
-                RuleKind::Dir => rule_raw_path,
+                RuleKind::Dir => &concretize(rule_raw_path),
                 _ => {
-                    base_owned = glob_base_path(rule_raw_path);
+                    base_owned = concretize(&glob_base_path(rule_raw_path));
                     &base_owned
                 }
             };
@@ -390,13 +427,13 @@ mod tests {
     fn matches_file_rule_with_store_user() {
         let rules = rules(&["<winAppData>/Sekiro/<storeUserId>/S0000.sl2"]);
         let m = rules
-            .match_rule("<winAppData>/Sekiro/12345/S0000.sl2")
+            .match_rule("<winAppData>/Sekiro/12345/S0000.sl2", true, "steam")
             .unwrap();
         assert_eq!(m.raw_path, "<winAppData>/Sekiro/<storeUserId>/S0000.sl2");
         assert_eq!(m.store_user.as_deref(), Some("12345"));
 
         let (raw, rel) =
-            split_rule_match(m.raw_path, m.kind, "<winAppData>/Sekiro/12345/S0000.sl2");
+            split_rule_match(m.raw_path, m.kind, "<winAppData>/Sekiro/12345/S0000.sl2", m.store_user.as_deref());
         assert_eq!(raw, "<winAppData>/Sekiro/<storeUserId>/S0000.sl2");
         assert_eq!(rel, "S0000.sl2");
         assert_eq!(join_restore_path(&raw, &rel), raw);
@@ -405,9 +442,9 @@ mod tests {
     #[test]
     fn matches_dir_rule() {
         let rules = rules(&["<winAppData>/Game"]);
-        let m = rules.match_rule("<winAppData>/Game/saves/slot1.sav").unwrap();
+        let m = rules.match_rule("<winAppData>/Game/saves/slot1.sav", true, "steam").unwrap();
         let (raw, rel) =
-            split_rule_match(m.raw_path, m.kind, "<winAppData>/Game/saves/slot1.sav");
+            split_rule_match(m.raw_path, m.kind, "<winAppData>/Game/saves/slot1.sav", m.store_user.as_deref());
         assert_eq!(raw, "<winAppData>/Game");
         assert_eq!(rel, "saves/slot1.sav");
         assert_eq!(join_restore_path(&raw, &rel), "<winAppData>/Game/saves/slot1.sav");
@@ -416,8 +453,8 @@ mod tests {
     #[test]
     fn matches_glob_rule() {
         let rules = rules(&["<home>/Game/*.sav"]);
-        let m = rules.match_rule("<home>/Game/slot1.sav").unwrap();
-        let (raw, rel) = split_rule_match(m.raw_path, m.kind, "<home>/Game/slot1.sav");
+        let m = rules.match_rule("<home>/Game/slot1.sav", false, "steam").unwrap();
+        let (raw, rel) = split_rule_match(m.raw_path, m.kind, "<home>/Game/slot1.sav", m.store_user.as_deref());
         assert_eq!(raw, "<home>/Game/*.sav");
         assert_eq!(rel, "slot1.sav");
         assert_eq!(join_restore_path(&raw, &rel), "<home>/Game/slot1.sav");
@@ -426,16 +463,16 @@ mod tests {
     #[test]
     fn dir_rule_does_not_match_sibling_prefix() {
         let rules = rules(&["<winAppData>/Game"]);
-        assert!(rules.match_rule("<winAppData>/GameX/file.sav").is_none());
+        assert!(rules.match_rule("<winAppData>/GameX/file.sav", true, "steam").is_none());
     }
 
     #[test]
     fn matches_range_and_brace_globs() {
         let rules = rules(&["<home>/Game/TEC2Slot[0-3].sol", "<base>/save{0,1}.dat"]);
-        assert!(rules.match_rule("<home>/Game/TEC2Slot2.sol").is_some());
-        assert!(rules.match_rule("<home>/Game/TEC2Slot9.sol").is_none());
-        assert!(rules.match_rule("<base>/save1.dat").is_some());
-        assert!(rules.match_rule("<base>/save2.dat").is_none());
+        assert!(rules.match_rule("<home>/Game/TEC2Slot2.sol", false, "steam").is_some());
+        assert!(rules.match_rule("<home>/Game/TEC2Slot9.sol", false, "steam").is_none());
+        assert!(rules.match_rule("<base>/save1.dat", false, "steam").is_some());
+        assert!(rules.match_rule("<base>/save2.dat", false, "steam").is_none());
     }
 
     #[test]
@@ -443,7 +480,7 @@ mod tests {
         let rules = rules(&["<winAppData>/Game"]);
         assert!(rules.allows_raw_path("<winAppData>/Game"));
         assert!(!rules.allows_raw_path("<home>/.ssh/authorized_keys"));
-        assert!(rules.match_rule("<home>/Other/file.sav").is_none());
+        assert!(rules.match_rule("<home>/Other/file.sav", false, "steam").is_none());
     }
 
     #[test]
