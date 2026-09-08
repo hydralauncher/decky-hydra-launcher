@@ -77,7 +77,10 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
   }, [getSnapshot, getLegacyArtifacts]);
 
   const runSync = useCallback(
-    async (force: boolean) => {
+    async (
+      force: boolean,
+      resolutions?: Record<string, "local" | "remote">
+    ) => {
       if (!auth || !hasActiveSubscription) return;
 
       setIsSyncing(true);
@@ -87,21 +90,33 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
           auth,
           game.objectId,
           game.winePrefixPath,
-          force
+          force,
+          resolutions ?? null
         );
 
         if (result.auth) setAuth(result.auth);
 
         if (!result.ok && result.conflict) {
           setIsSyncing(false);
+          const names = result.conflict.map((identity) => {
+            const parts = identity.split("");
+
+            return parts.slice(1).join("/");
+          });
+          const resolveAll = (side: "local" | "remote") => {
+            const map = Object.fromEntries(
+              result.conflict!.map((identity) => [identity, side])
+            );
+            runSync(true, map);
+          };
           showModal(
             <ConfirmModal
               strTitle="Cloud Save Conflict"
-              strDescription={`Both this device and the cloud have changed ${result.conflict.length} file(s): ${result.conflict.slice(0, 3).join(", ")}${result.conflict.length > 3 ? ", ..." : ""}. Keep your local save or the cloud version?`}
+              strDescription={`Both this device and the cloud changed ${names.length} file(s): ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}. Everything else merges automatically; choose the side for these.`}
               strOKButtonText="Keep Local"
               strCancelButtonText="Keep Cloud"
-              onOK={() => runSync(true)}
-              onCancel={() => restore()}
+              onOK={() => resolveAll("local")}
+              onCancel={() => resolveAll("remote")}
             />
           );
           return;

@@ -411,6 +411,8 @@ struct RestoreManifestResponse {
     snapshot: RestoreManifestSnapshot,
     #[serde(default)]
     variants: Vec<SnapshotVariant>,
+    #[serde(default)]
+    custom_path_raw_paths: Vec<String>,
     files: Vec<RestoreManifestFile>,
 }
 
@@ -553,6 +555,10 @@ pub struct DiscoveryOutput {
     files: Vec<DiscoveredFile>,
     variants: Vec<SnapshotVariant>,
     custom_raw_paths: Vec<String>,
+    /// False when a custom save path's local directory is missing (e.g.
+    /// unmounted SD card) — merges must not run on incomplete coverage or
+    /// missing files would look like local deletions.
+    complete: bool,
 }
 
 async fn discover_files(
@@ -660,7 +666,11 @@ async fn discover_files(
         variants.len()
     );
 
-    Ok(DiscoveryOutput { files, variants, custom_raw_paths })
+    let complete = bindings
+        .iter()
+        .all(|(_, local_path, _)| Path::new(local_path).is_dir());
+
+    Ok(DiscoveryOutput { files, variants, custom_raw_paths, complete })
 }
 
 
@@ -696,6 +706,7 @@ pub async fn sync_cloud_save(
     shop: &str,
     wine_prefix: Option<&str>,
     force: bool,
+    resolutions: Option<HashMap<String, String>>,
 ) -> Result<SyncResult> {
     let auth: Auth = serde_json::from_str(auth_json).context("Invalid auth payload")?;
     let base_client = reqwest::Client::new();
@@ -729,6 +740,7 @@ pub async fn sync_cloud_save(
         };
         let mut files: Vec<SnapshotFileEntry> = discovered.files.iter().map(|f| f.entry.clone()).collect();
         let mut variants: Vec<SnapshotVariant> = discovered.variants.clone();
+        let mut custom_raw_paths = discovered.custom_raw_paths.clone();
 
         let aggregate_hash;
 
@@ -755,16 +767,39 @@ pub async fn sync_cloud_save(
                     .as_ref()
                     .is_some_and(|anchor| anchor.base_version == latest.version);
                 if remote_newer && !anchor_matches {
-                    // 3-way merge against the last state any local actor saw
+                    // Merging requires complete local coverage: an unmounted
+                    // custom path or unreadable root would look like a local
+                    // deletion and propagate it remotely.
+                    if !discovered.complete {
+                        return Err(anyhow!("remote-newer"));
+                    }
+
+                    // 3-way merge against the newest state any local actor saw
                     // (plugin state entries or the launcher's anchor entries).
-                    let base_entries: Option<Vec<StateEntry>> = state
+                    let from_state = state
                         .as_ref()
-                        .and_then(|s| s.entries.clone())
-                        .or_else(|| anchor.map(|a| a.entries));
+                        .and_then(|s| s.entries.clone().map(|e| (s.version, e)));
+                    let from_anchor = anchor
+                        .as_ref()
+                        .filter(|a| !a.entries.is_empty())
+                        .map(|a| (a.base_version, a.entries.clone()));
+
+                    let base_entries = match (from_state, from_anchor) {
+                        (Some((sv, se)), Some((av, ae))) => {
+                            if sv >= av { Some(se) } else { Some(ae) }
+                        }
+                        (Some((_, se)), None) => Some(se),
+                        (None, Some((_, ae))) => Some(ae),
+                        (None, None) => None,
+                    };
 
                     let Some(base_entries) = base_entries.filter(|e| !e.is_empty()) else {
                         return Err(anyhow!("remote-newer"));
                     };
+
+                    let base_exclude: std::collections::HashSet<String> = anchor
+                        .map(|a| a.unresolved_entry_ids.into_iter().collect())
+                        .unwrap_or_default();
 
                     let manifest = fetch_restore_manifest(&client, &latest.id).await?;
                     let remote_files: Vec<SnapshotFileEntry> = manifest
@@ -780,8 +815,40 @@ pub async fn sync_cloud_save(
                         })
                         .collect();
 
-                    let outcome =
-                        crate::merge::merge_snapshots(&files, &remote_files, Some(&base_entries));
+                    let mut outcome = crate::merge::merge_snapshots(
+                        &files,
+                        &remote_files,
+                        Some(&base_entries),
+                        &base_exclude,
+                    )
+                    .map_err(|e| anyhow!("merge failed: {e}"))?;
+
+                    // Per-identity conflict resolutions: apply the chosen side
+                    // and keep the rest of the merge intact (mirrors the
+                    // launcher's re-merge on resolve).
+                    if let Some(resolutions) = &resolutions {
+                        let mut remaining = Vec::new();
+                        for conflict in outcome.conflicts.drain(..) {
+                            match resolutions.get(&conflict.identity).map(String::as_str) {
+                                Some("local") => {
+                                    if let Some(f) =
+                                        files.iter().find(|f| conflict.id_of(f)).cloned()
+                                    {
+                                        outcome.files.push(f);
+                                    }
+                                }
+                                Some("remote") => {
+                                    if let Some(f) =
+                                        remote_files.iter().find(|f| conflict.id_of(f)).cloned()
+                                    {
+                                        outcome.files.push(f);
+                                    }
+                                }
+                                _ => remaining.push(conflict),
+                            }
+                        }
+                        outcome.conflicts = remaining;
+                    }
 
                     if !outcome.conflicts.is_empty() {
                         return Ok(SyncResult {
@@ -810,12 +877,33 @@ pub async fn sync_cloud_save(
                         outcome.files.len()
                     );
 
-                    // Union of variants so merged remote entries stay valid.
+                    // Union of variants so merged remote entries stay valid;
+                    // same-id variants must agree on their metadata.
                     for variant in &manifest.variants {
-                        if !variants.iter().any(|v| v.variant_id == variant.variant_id) {
-                            variants.push(variant.clone());
+                        match variants.iter().find(|v| v.variant_id == variant.variant_id) {
+                            Some(existing)
+                                if existing.kind != variant.kind
+                                    || existing.steam_id64 != variant.steam_id64
+                                    || existing.concrete_folder_id != variant.concrete_folder_id =>
+                            {
+                                return Err(anyhow!(
+                                    "Merged variant metadata diverges from remote"
+                                ));
+                            }
+                            None => variants.push(variant.clone()),
+                            _ => {}
                         }
                     }
+
+                    // Custom path roots from the remote manifest stay
+                    // advertised so merged custom files remain valid.
+                    for raw_path in &manifest.custom_path_raw_paths {
+                        if !custom_raw_paths.contains(raw_path) {
+                            custom_raw_paths.push(raw_path.clone());
+                        }
+                    }
+                    custom_raw_paths.sort();
+
                     files = outcome.files;
                 }
             }
@@ -867,15 +955,19 @@ pub async fn sync_cloud_save(
 
             if same {
                 eprintln!("sync: local content matches remote v{}, skipping", remote.version);
-                let entries = identity_equal.then(|| {
-                    files.iter().map(|f| StateEntry {
+                // Identity-equal matches carry the local entries; a
+                // multiset-only match keeps whatever entries we already had.
+                let entries = if identity_equal {
+                    Some(files.iter().map(|f| StateEntry {
                         variant_id: f.variant_id.clone(),
                         raw_path: f.raw_path.clone(),
                         relative_path: f.relative_path.clone(),
                         hash: f.hash.clone(),
                         size_bytes: f.size_bytes,
-                    }).collect()
-                });
+                    }).collect())
+                } else {
+                    read_state(shop, object_id).and_then(|s| s.entries)
+                };
                 write_state_logged(
                     shop,
                     object_id,
@@ -912,6 +1004,7 @@ pub async fn sync_cloud_save(
             &variants,
             &files,
             &discovered,
+            &custom_raw_paths,
             &aggregate_hash,
         )
         .await
@@ -1002,6 +1095,7 @@ async fn prepare_upload_commit(
     variants: &[SnapshotVariant],
     files: &[SnapshotFileEntry],
     discovered: &DiscoveryOutput,
+    custom_raw_paths: &[String],
     aggregate_hash: &str,
 ) -> Result<(CommitSnapshotResponse, usize, usize)> {
     let mut payload = serde_json::json!({
@@ -1010,7 +1104,7 @@ async fn prepare_upload_commit(
         "platform": "linux",
         "snapshotHash": aggregate_hash,
         "baseVersion": base_version,
-        "customPathRawPaths": discovered.custom_raw_paths,
+        "customPathRawPaths": custom_raw_paths,
         "variants": variants,
         "files": files.iter().map(|f| serde_json::json!({
             "variantId": f.variant_id,
@@ -1111,7 +1205,9 @@ async fn prepare_upload_commit(
         let source = source_by_key
             .get(&key)
             .or_else(|| source_by_blob.get(&format!("{}\u{0}{}", proposal.hash, proposal.size_bytes)))
-            .ok_or_else(|| anyhow!("Missing local upload source"))?;
+            .ok_or_else(|| anyhow!(
+                "Remote file content missing from cloud storage; restore the cloud save first, then sync again"
+            ))?;
 
         let blob_key = format!("{}\u{0}{}", proposal.hash, proposal.size_bytes);
         upload_jobs
@@ -1864,7 +1960,7 @@ pub async fn check_cloud_save_status(
                         wine_prefix_path: wine_prefix.map(|p| p.to_string()),
                         updated_at: chrono::Utc::now()
                             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                        entries: None,
+                        entries: state.as_ref().and_then(|s| s.entries.clone()),
                     },
                 );
             }

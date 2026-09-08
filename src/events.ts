@@ -17,7 +17,7 @@ export const downloadGameArtifact = callable<
   void
 >("download_game_artifact");
 export const syncCloudSave = callable<
-  [Auth, string, string | null, boolean],
+  [Auth, string, string | null, boolean, Record<string, "local" | "remote"> | null],
   CloudSaveSyncResult
 >("sync_cloud_save");
 export const restoreCloudSave = callable<

@@ -73,11 +73,13 @@ class Plugin:
     async def download_game_artifact(self, object_id: str, download_url: str, object_key: str, home_dir: str, wine_prefix: str, artifact_wine_prefix: str | None):
         await _run_backend(["download-game-artifact", object_id, download_url, object_key, home_dir, wine_prefix, artifact_wine_prefix or ""])
 
-    async def sync_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None, force: bool):
+    async def sync_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None, force: bool, resolutions: dict | None = None):
         # Auth goes through stdin so tokens never appear in the process list.
         args = ["sync-cloud-save", object_id, wine_prefix or ""]
         if force:
             args.append("force")
+        if resolutions:
+            args.append(json.dumps(resolutions))
         result = await _run_backend(args, json.dumps(auth))
         payload = json.loads(result)
         decky.logger.info(

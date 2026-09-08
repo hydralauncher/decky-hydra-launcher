@@ -47,8 +47,10 @@ async fn main() {
             let object_id = std::env::args().nth(2).expect("no object id given");
             let wine_prefix = optional_arg(std::env::args().nth(3));
             let force = std::env::args().nth(4).as_deref() == Some("force");
+            let resolutions = optional_arg(std::env::args().nth(5))
+                .map(|json| serde_json::from_str(&json).expect("invalid resolutions json"));
 
-            match cloud_save::sync_cloud_save(&auth_json, &object_id, "steam", wine_prefix.as_deref(), force).await {
+            match cloud_save::sync_cloud_save(&auth_json, &object_id, "steam", wine_prefix.as_deref(), force, resolutions).await {
                 Ok(result) => println!("{}", serde_json::to_string(&result).unwrap()),
                 Err(err) => {
                     println!("{}", serde_json::json!({ "ok": false, "error": format!("{err:#}") }));

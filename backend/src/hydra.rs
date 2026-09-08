@@ -152,6 +152,9 @@ pub fn get_custom_paths(object_id: &str, shop: &str) -> Vec<(String, String, Opt
 pub struct SyncAnchor {
     pub base_version: u64,
     pub entries: Vec<crate::cloud_save::StateEntry>,
+    /// Entry ids the launcher deliberately left unresolved; they must be
+    /// excluded from the merge base (its own merge does the same).
+    pub unresolved_entry_ids: Vec<String>,
 }
 
 pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<SyncAnchor> {
@@ -205,9 +208,28 @@ pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<SyncAnchor> {
             })
             .unwrap_or_default();
 
+        // Anchor entry ids are JSON arrays [variantId, rawPath, relativePath].
+        let unresolved_entry_ids = value
+            .get("unresolvedRemoteEntryIds")
+            .and_then(|e| e.as_array())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| {
+                        let parts: Vec<String> = serde_json::from_value(id.clone()).ok()?;
+                        if parts.len() == 3 {
+                            Some(parts.join("\u{0}"))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let anchor = SyncAnchor {
             base_version: version,
             entries,
+            unresolved_entry_ids,
         };
 
         let replace = match &best {

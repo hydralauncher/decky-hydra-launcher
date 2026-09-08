@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::cloud_save::{SnapshotFileEntry, StateEntry};
 
@@ -15,6 +15,13 @@ pub struct ConflictEntry {
     pub identity: String,
     pub local_hash: Option<String>,
     pub remote_hash: Option<String>,
+}
+
+impl ConflictEntry {
+    /// Whether a snapshot file carries this conflict's identity.
+    pub fn id_of(&self, file: &SnapshotFileEntry) -> bool {
+        key(&to_state_entry(file)) == self.identity
+    }
 }
 
 fn key(entry: &StateEntry) -> String {
@@ -39,14 +46,27 @@ pub fn merge_snapshots(
     local: &[SnapshotFileEntry],
     remote: &[SnapshotFileEntry],
     base: Option<&[StateEntry]>,
-) -> MergeOutcome {
-    let local_map: HashMap<String, &SnapshotFileEntry> =
-        local.iter().map(|f| (key(&to_state_entry(f)), f)).collect();
-    let remote_map: HashMap<String, &SnapshotFileEntry> =
-        remote.iter().map(|f| (key(&to_state_entry(f)), f)).collect();
+    base_exclude: &HashSet<String>,
+) -> Result<MergeOutcome, String> {
+    fn index<'a>(
+        files: &'a [SnapshotFileEntry],
+    ) -> Result<HashMap<String, &'a SnapshotFileEntry>, String> {
+        let mut map = HashMap::new();
+        for f in files {
+            let k = key(&to_state_entry(f));
+            if map.insert(k.clone(), f).is_some() {
+                return Err(format!("duplicate file identity: {k}"));
+            }
+        }
+        Ok(map)
+    }
+
+    let local_map = index(local)?;
+    let remote_map = index(remote)?;
     let base_map: HashMap<String, &StateEntry> = base
         .unwrap_or(&[])
         .iter()
+        .filter(|e| !base_exclude.contains(&key(e)))
         .map(|e| (key(e), e))
         .collect();
 
@@ -125,7 +145,7 @@ pub fn merge_snapshots(
         }
     }
 
-    MergeOutcome { files, conflicts }
+    Ok(MergeOutcome { files, conflicts })
 }
 
 #[cfg(test)]
@@ -159,7 +179,7 @@ mod tests {
         let local = vec![file("<home>/g", "a.sav", "h1")];
         let remote = vec![file("<home>/g", "a.sav", "h2")];
 
-        let merged = merge_snapshots(&local, &remote, Some(&base));
+        let merged = merge_snapshots(&local, &remote, Some(&base), &Default::default()).unwrap();
         assert!(merged.conflicts.is_empty());
         assert_eq!(merged.files[0].hash, "h2");
     }
@@ -170,7 +190,7 @@ mod tests {
         let local = vec![file("<home>/g", "a.sav", "h2")];
         let remote = vec![file("<home>/g", "a.sav", "h3")];
 
-        let merged = merge_snapshots(&local, &remote, Some(&base));
+        let merged = merge_snapshots(&local, &remote, Some(&base), &Default::default()).unwrap();
         assert_eq!(merged.conflicts.len(), 1);
         assert!(merged.files.is_empty());
     }
@@ -181,7 +201,7 @@ mod tests {
         let local: Vec<SnapshotFileEntry> = vec![];
         let remote = vec![file("<home>/g", "a.sav", "h1")];
 
-        let merged = merge_snapshots(&local, &remote, Some(&base));
+        let merged = merge_snapshots(&local, &remote, Some(&base), &Default::default()).unwrap();
         assert!(merged.conflicts.is_empty());
         assert!(merged.files.is_empty());
     }
@@ -191,7 +211,7 @@ mod tests {
         let local = vec![file("<home>/g", "a.sav", "h1")];
         let remote = vec![file("<home>/g", "a.sav", "h2")];
 
-        let merged = merge_snapshots(&local, &remote, None);
+        let merged = merge_snapshots(&local, &remote, None, &Default::default()).unwrap();
         assert_eq!(merged.conflicts.len(), 1);
     }
 }

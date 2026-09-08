@@ -240,7 +240,8 @@ const onAppLifetimeNotification = async (
           freshAuth,
           game.objectId,
           game.winePrefixPath,
-          false
+          false,
+          null
         );
 
         if (result.auth) {
