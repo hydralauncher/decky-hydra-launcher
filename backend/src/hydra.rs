@@ -47,13 +47,12 @@ struct Game {
     executable_path: Option<String>,
 }
 
-fn get_leveldb_snapshot() -> Snapshot {
-    let original_path = dirs::config_dir()
-        .unwrap()
+fn get_leveldb_snapshot() -> Option<Snapshot> {
+    let original_path = dirs::config_dir()?
         .join("hydralauncher")
         .join("hydra-db");
 
-    let temp_dir = tempfile::tempdir().unwrap();
+    let temp_dir = tempfile::tempdir().ok()?;
 
     fs_extra::dir::copy(
         &original_path,
@@ -63,29 +62,39 @@ fn get_leveldb_snapshot() -> Snapshot {
             ..Default::default()
         },
     )
-    .unwrap();
+    .ok()?;
 
-    Snapshot {
-        db: DB::open(temp_dir.path(), Options::default()).unwrap(),
-        _temp_dir: temp_dir,
+    match DB::open(temp_dir.path(), Options::default()) {
+        Ok(db) => Some(Snapshot {
+            db,
+            _temp_dir: temp_dir,
+        }),
+        Err(err) => {
+            eprintln!("Failed to open launcher database snapshot: {err}");
+            None
+        }
     }
 }
 
 pub fn get_auth() -> String {
-    let mut snapshot = get_leveldb_snapshot();
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+        return String::new();
+    };
 
     let auth = match snapshot.db.get(b"auth") {
-        Some(auth_data) => String::from_utf8(auth_data).unwrap().to_string(),
+        Some(auth_data) => String::from_utf8(auth_data).unwrap_or_default(),
         None => String::from(""),
     };
 
-    snapshot.db.close().unwrap();
+    let _ = snapshot.db.close();
 
     auth
 }
 
 pub fn get_game_executable_path(object_id: &str, shop: &str) -> Option<String> {
-    let mut snapshot = get_leveldb_snapshot();
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+        return None;
+    };
     let key = format!("!games!{shop}:{object_id}");
     let value = snapshot.db.get(key.as_bytes())?;
     let _ = snapshot.db.close();
@@ -98,7 +107,9 @@ pub fn get_game_executable_path(object_id: &str, shop: &str) -> Option<String> {
 /// (rawPath, localPath, storeUserId) triples, longest rawPath first.
 /// Read-only: the plugin never writes bindings.
 pub fn get_custom_paths(object_id: &str, shop: &str) -> Vec<(String, String, Option<String>)> {
-    let mut snapshot = get_leveldb_snapshot();
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+        return Vec::new();
+    };
 
     let user_id = snapshot
         .db
@@ -158,8 +169,12 @@ pub struct SyncAnchor {
 }
 
 pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<SyncAnchor> {
-    let mut snapshot = get_leveldb_snapshot();
-    let mut iter = snapshot.db.new_iter().unwrap();
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+        return None;
+    };
+    let Ok(mut iter) = snapshot.db.new_iter() else {
+        return None;
+    };
 
     let mut best: Option<(SyncAnchor, String)> = None; // (anchor, updatedAt)
 
@@ -246,17 +261,21 @@ pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<SyncAnchor> {
 }
 
 pub fn get_library() -> String {
-    let mut snapshot = get_leveldb_snapshot();
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+        return "[]".to_string();
+    };
 
     // The launcher stores the v2 auto-sync toggle in a separate sublevel; the
     // legacy game flag is no longer the source of truth. v2 sync defaults to
     // enabled for Steam games unless the sublevel explicitly says false.
     let mut sync_settings: HashMap<String, bool> = HashMap::new();
-    let mut iter = snapshot.db.new_iter().unwrap();
+    let Ok(mut iter) = snapshot.db.new_iter() else {
+        return "[]".to_string();
+    };
     while let Some((key_bytes, value_bytes)) = iter.next() {
-        let key = String::from_utf8(key_bytes).unwrap();
+        let Ok(key) = String::from_utf8(key_bytes) else { continue };
         if let Some(game_key) = key.strip_prefix("!cloud-save-automatic-sync-settings!") {
-            let value = String::from_utf8(value_bytes).unwrap();
+            let Ok(value) = String::from_utf8(value_bytes) else { continue };
             let enabled = matches!(value.trim(), "true" | "\"true\"");
             sync_settings.insert(game_key.to_string(), enabled);
         }
@@ -267,13 +286,16 @@ pub fn get_library() -> String {
         .join("hydralauncher")
         .join("wine-prefixes");
 
-    let mut iter = snapshot.db.new_iter().unwrap();
+    let Ok(mut iter) = snapshot.db.new_iter() else {
+        return "[]".to_string();
+    };
     let mut library = Vec::new();
 
     while let Some((key_bytes, value_bytes)) = iter.next() {
-        let key = String::from_utf8(key_bytes).unwrap();
+        let Ok(key) = String::from_utf8(key_bytes) else { continue };
         if key.starts_with("!games") {
-            let mut game: Game = serde_json::from_str(&String::from_utf8(value_bytes).unwrap()).unwrap();
+            let Ok(value_str) = String::from_utf8(value_bytes) else { continue };
+            let Ok(mut game) = serde_json::from_str::<Game>(&value_str) else { continue };
 
             let game_key = format!("{}:{}", game.shop, game.object_id);
             if let Some(enabled) = sync_settings.get(&game_key) {
@@ -295,9 +317,9 @@ pub fn get_library() -> String {
         }
     }
 
-    snapshot.db.close().unwrap();
+    let _ = snapshot.db.close();
 
-    serde_json::to_string(&library).unwrap()
+    serde_json::to_string(&library).unwrap_or_else(|_| "[]".to_string())
 }
 
 fn restore_ludusavi_backup(
@@ -311,9 +333,11 @@ fn restore_ludusavi_backup(
     let mapping_yaml_path = game_backup_path.join("mapping.yaml");
 
     let data = fs::read_to_string(&mapping_yaml_path)?;
-    let manifest: BackupManifest = serde_yaml::from_str(&data).unwrap();
+    let manifest: BackupManifest = serde_yaml::from_str(&data)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    let user_profile_path = get_windows_like_user_profile_path(wine_prefix_path.unwrap()).unwrap();
+    let user_profile_path = get_windows_like_user_profile_path(wine_prefix_path.unwrap_or(""))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
 
     for backup in manifest.backups {
         for key in backup.files.keys() {

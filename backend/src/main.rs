@@ -40,7 +40,11 @@ async fn main() {
             let wine_prefix = std::env::args().nth(6).expect("no wine prefix given");
             let artifact_wine_prefix = std::env::args().nth(7);
 
-            download_game_artifact(&object_id, "steam", &download_url, &object_key, &home_dir, Some(&wine_prefix), artifact_wine_prefix).await.unwrap();
+            if let Err(err) = download_game_artifact(&object_id, "steam", &download_url, &object_key, &home_dir, Some(&wine_prefix), artifact_wine_prefix).await {
+                println!("{}", serde_json::json!({ "ok": false, "error": format!("{err:#}") }));
+                std::process::exit(1);
+            }
+            println!("{}", serde_json::json!({ "ok": true }));
         }
         "sync-cloud-save" => {
             let auth_json = read_auth_from_stdin();

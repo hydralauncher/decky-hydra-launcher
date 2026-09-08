@@ -51,7 +51,7 @@ export interface CloudSaveStatus {
 export interface Auth {
   accessToken: string;
   refreshToken: string;
-  tokenExpirationTimestamp: number;
+  tokenExpirationTimestamp?: number;
 }
 
 export interface GameAssets {

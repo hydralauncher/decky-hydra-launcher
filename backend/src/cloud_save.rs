@@ -1186,7 +1186,9 @@ async fn prepare_upload_commit(
             .required_headers
             .clone()
             .ok_or_else(|| anyhow!("Missing required headers"))?;
-        if required_headers.len() != 2 {
+        if !required_headers.contains_key("Content-Length")
+            || !required_headers.contains_key("x-amz-checksum-sha256")
+        {
             return Err(anyhow!("Unexpected prepare upload headers"));
         }
 
