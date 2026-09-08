@@ -88,6 +88,12 @@ pub fn get_auth() -> String {
 
     let _ = snapshot.db.close();
 
+    // "null" parses cleanly to None in the frontend; an empty string would
+    // raise a JSONDecodeError in main.py.
+    if auth.is_empty() {
+        return "null".to_string();
+    }
+
     auth
 }
 
@@ -281,10 +287,10 @@ pub fn get_library() -> String {
         }
     }
 
-    let wine_prefixes_dir = dirs::config_dir()
-        .unwrap()
-        .join("hydralauncher")
-        .join("wine-prefixes");
+    let Some(config_dir) = dirs::config_dir() else {
+        return "[]".to_string();
+    };
+    let wine_prefixes_dir = config_dir.join("hydralauncher").join("wine-prefixes");
 
     let Ok(mut iter) = snapshot.db.new_iter() else {
         return "[]".to_string();
@@ -392,7 +398,7 @@ pub async fn download_game_artifact(
     artifact_wine_prefix_path: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let backups_path = dirs::config_dir()
-        .unwrap()
+        .ok_or("No config dir")?
         .join("hydralauncher")
         .join("Backups");
 
