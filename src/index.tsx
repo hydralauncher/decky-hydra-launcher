@@ -247,6 +247,17 @@ const onAppLifetimeNotification = async (
           useAuthStore.getState().setAuth(result.auth);
         }
 
+        if (!result.ok && result.conflict) {
+          // Both sides changed the same files: flag and let the user pick.
+          useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+          toaster.toast({
+            title: "Cloud save conflict",
+            body: `${game.title}: ${result.conflict.length} file(s) changed on both this device and the cloud. Open the Hydra plugin to choose which to keep.`,
+            logo: composeToastLogo(game.iconUrl),
+          });
+          return;
+        }
+
         toaster.toast({
           title: "Cloud save synced",
           body: `${game.title} save has been uploaded to the cloud`,

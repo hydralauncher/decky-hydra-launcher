@@ -21,6 +21,7 @@ export interface CloudSaveSnapshotSummary {
 
 export interface CloudSaveSyncResult {
   ok: boolean;
+  conflict?: string[];
   snapshotId: string;
   version: number;
   fileCount: number;

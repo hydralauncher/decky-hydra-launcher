@@ -91,6 +91,22 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         );
 
         if (result.auth) setAuth(result.auth);
+
+        if (!result.ok && result.conflict) {
+          setIsSyncing(false);
+          showModal(
+            <ConfirmModal
+              strTitle="Cloud Save Conflict"
+              strDescription={`Both this device and the cloud have changed ${result.conflict.length} file(s): ${result.conflict.slice(0, 3).join(", ")}${result.conflict.length > 3 ? ", ..." : ""}. Keep your local save or the cloud version?`}
+              strOKButtonText="Keep Local"
+              strCancelButtonText="Keep Cloud"
+              onOK={() => runSync(true)}
+              onCancel={() => restore()}
+            />
+          );
+          return;
+        }
+
         useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
 
         toaster.toast({

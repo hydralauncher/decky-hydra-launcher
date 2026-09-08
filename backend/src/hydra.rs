@@ -147,15 +147,18 @@ pub fn get_custom_paths(object_id: &str, shop: &str) -> Vec<(String, String, Opt
     bindings
 }
 
-/// Latest sync anchor the launcher wrote for this game, as
-/// (baseVersion, baseAggregateHash). The anchor marks the remote snapshot
-/// this device's launcher last synced — if the remote still matches it, any
-/// local drift is newer progress.
-pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<(u64, String)> {
+/// Latest sync anchor the launcher wrote for this game: baseVersion and
+/// per-file entries (the 3-way merge base).
+pub struct SyncAnchor {
+    pub base_version: u64,
+    pub entries: Vec<crate::cloud_save::StateEntry>,
+}
+
+pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<SyncAnchor> {
     let mut snapshot = get_leveldb_snapshot();
     let mut iter = snapshot.db.new_iter().unwrap();
 
-    let mut best: Option<(u64, String, String)> = None; // (baseVersion, hash, updatedAt)
+    let mut best: Option<(SyncAnchor, String)> = None; // (anchor, updatedAt)
 
     while let Some((key_bytes, value_bytes)) = iter.next() {
         let Ok(key) = String::from_utf8(key_bytes) else { continue };
@@ -176,25 +179,48 @@ pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<(u64, String)> {
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(&value_bytes) else {
             continue;
         };
-        let (Some(version), Some(hash), Some(updated_at)) = (
+        let (Some(version), Some(updated_at)) = (
             value.get("baseVersion").and_then(|v| v.as_u64()),
-            value.get("baseAggregateHash").and_then(|v| v.as_str()),
             value.get("updatedAt").and_then(|v| v.as_str()),
         ) else {
             continue;
         };
 
+        let entries = value
+            .get("entries")
+            .and_then(|e| e.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|e| {
+                        Some(crate::cloud_save::StateEntry {
+                            variant_id: e.get("variantId")?.as_str()?.to_string(),
+                            raw_path: e.get("rawPath")?.as_str()?.to_string(),
+                            relative_path: e.get("relativePath")?.as_str()?.to_string(),
+                            hash: e.get("hash")?.as_str()?.to_string(),
+                            size_bytes: e.get("sizeBytes")?.as_u64()?,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let anchor = SyncAnchor {
+            base_version: version,
+            entries,
+        };
+
         let replace = match &best {
-            Some((_, _, best_updated)) => updated_at > best_updated.as_str(),
+            Some((_, best_updated)) => updated_at > best_updated.as_str(),
             None => true,
         };
         if replace {
-            best = Some((version, hash.to_string(), updated_at.to_string()));
+            best = Some((anchor, updated_at.to_string()));
         }
     }
 
     let _ = snapshot.db.close();
-    best.map(|(version, hash, _)| (version, hash))
+    best.map(|(anchor, _)| anchor)
 }
 
 pub fn get_library() -> String {

@@ -2,6 +2,7 @@ use hydra::{get_auth, get_library, download_game_artifact};
 
 mod cloud_save;
 mod hydra;
+mod merge;
 mod rules;
 mod scanner;
 mod wine;

@@ -298,12 +298,26 @@ pub fn build_aggregate_hash(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StateEntry {
+    pub variant_id: String,
+    pub raw_path: String,
+    pub relative_path: String,
+    pub hash: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CloudSaveState {
     pub snapshot_id: String,
     pub version: u64,
     pub aggregate_hash: String,
     pub wine_prefix_path: Option<String>,
     pub updated_at: String,
+    /// Per-file identities at last sync; base for 3-way merges. Absent when
+    /// the state was healed from a content check without identity detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries: Option<Vec<StateEntry>>,
 }
 
 fn state_dir() -> Result<PathBuf> {
@@ -663,6 +677,9 @@ async fn sha256_file_hex(path: &Path) -> Result<String> {
 #[serde(rename_all = "camelCase")]
 pub struct SyncResult {
     pub ok: bool,
+    /// Conflicting file identities when a 3-way merge could not resolve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<Vec<String>>,
     pub snapshot_id: String,
     pub version: u64,
     pub file_count: u64,
@@ -694,7 +711,7 @@ pub async fn sync_cloud_save(
     // mid-sync. Discovery runs inside the loop so a retry re-scans and
     // re-hashes the save files from scratch.
     let mut last_error: Option<anyhow::Error> = None;
-    let mut result: Option<(CommitSnapshotResponse, usize, usize)> = None;
+    let mut result: Option<(CommitSnapshotResponse, usize, usize, Vec<StateEntry>)> = None;
 
     for attempt in 0..2 {
         let discovered = match discover_files(object_id, shop, wine_prefix).await {
@@ -710,20 +727,10 @@ pub async fn sync_cloud_save(
                 return Err(err);
             }
         };
-        let files: Vec<SnapshotFileEntry> = discovered.files.iter().map(|f| f.entry.clone()).collect();
+        let mut files: Vec<SnapshotFileEntry> = discovered.files.iter().map(|f| f.entry.clone()).collect();
+        let mut variants: Vec<SnapshotVariant> = discovered.variants.clone();
 
-        let total_size: u64 = files.iter().map(|f| f.size_bytes).sum();
-        if files.len() > MAX_SNAPSHOT_FILES {
-            return Err(anyhow!(
-                "Too many save files ({} > {MAX_SNAPSHOT_FILES})",
-                files.len()
-            ));
-        }
-        if total_size > MAX_SNAPSHOT_BYTES {
-            return Err(anyhow!("Save files exceed 2 GiB limit"));
-        }
-
-        let aggregate_hash = build_aggregate_hash(&discovered.variants, &files)?;
+        let aggregate_hash;
 
         let snapshots = list_snapshots(&client, shop, object_id).await?;
 
@@ -743,13 +750,89 @@ pub async fn sync_cloud_save(
                     }
                     None => true,
                 };
-                let anchor_matches = crate::hydra::get_sync_anchor(object_id, shop)
-                    .is_some_and(|(base_version, _)| base_version == latest.version);
+                let anchor = crate::hydra::get_sync_anchor(object_id, shop);
+                let anchor_matches = anchor
+                    .as_ref()
+                    .is_some_and(|anchor| anchor.base_version == latest.version);
                 if remote_newer && !anchor_matches {
-                    return Err(anyhow!("remote-newer"));
+                    // 3-way merge against the last state any local actor saw
+                    // (plugin state entries or the launcher's anchor entries).
+                    let base_entries: Option<Vec<StateEntry>> = state
+                        .as_ref()
+                        .and_then(|s| s.entries.clone())
+                        .or_else(|| anchor.map(|a| a.entries));
+
+                    let Some(base_entries) = base_entries.filter(|e| !e.is_empty()) else {
+                        return Err(anyhow!("remote-newer"));
+                    };
+
+                    let manifest = fetch_restore_manifest(&client, &latest.id).await?;
+                    let remote_files: Vec<SnapshotFileEntry> = manifest
+                        .files
+                        .iter()
+                        .map(|f| SnapshotFileEntry {
+                            variant_id: f.variant_id.clone(),
+                            raw_path: f.raw_path.clone(),
+                            relative_path: f.relative_path.clone(),
+                            hash: f.hash.clone(),
+                            size_bytes: f.size_bytes,
+                            last_modified_at: f.last_modified_at.clone(),
+                        })
+                        .collect();
+
+                    let outcome =
+                        crate::merge::merge_snapshots(&files, &remote_files, Some(&base_entries));
+
+                    if !outcome.conflicts.is_empty() {
+                        return Ok(SyncResult {
+                            ok: false,
+                            conflict: Some(
+                                outcome
+                                    .conflicts
+                                    .iter()
+                                    .map(|c| c.identity.clone())
+                                    .collect(),
+                            ),
+                            snapshot_id: latest.id.clone(),
+                            version: latest.version,
+                            file_count: 0,
+                            total_size_bytes: 0,
+                            uploaded_files: 0,
+                            skipped_files: 0,
+                            auth: Some(auth),
+                        });
+                    }
+
+                    eprintln!(
+                        "sync: merged {} local + {} remote files ({} merged)",
+                        files.len(),
+                        remote_files.len(),
+                        outcome.files.len()
+                    );
+
+                    // Union of variants so merged remote entries stay valid.
+                    for variant in &manifest.variants {
+                        if !variants.iter().any(|v| v.variant_id == variant.variant_id) {
+                            variants.push(variant.clone());
+                        }
+                    }
+                    files = outcome.files;
                 }
             }
         }
+
+        let total_size: u64 = files.iter().map(|f| f.size_bytes).sum();
+        if files.len() > MAX_SNAPSHOT_FILES {
+            return Err(anyhow!(
+                "Too many save files ({} > {MAX_SNAPSHOT_FILES})",
+                files.len()
+            ));
+        }
+        if total_size > MAX_SNAPSHOT_BYTES {
+            return Err(anyhow!("Save files exceed 2 GiB limit"));
+        }
+
+        aggregate_hash = build_aggregate_hash(&variants, &files)?;
 
         let base_version = snapshots.last().map(|s| s.version).unwrap_or(0);
 
@@ -758,7 +841,8 @@ pub async fn sync_cloud_save(
         // first; on mismatch, compare blob multisets to catch identity-only
         // drift (e.g. environment path changes).
         if let Some(remote) = snapshots.last() {
-            let mut same = aggregate_hash == remote.aggregate_hash;
+            let identity_equal = aggregate_hash == remote.aggregate_hash;
+            let mut same = identity_equal;
             if !same {
                 match fetch_restore_manifest(&client, &remote.id).await {
                     Ok(manifest) => {
@@ -783,6 +867,15 @@ pub async fn sync_cloud_save(
 
             if same {
                 eprintln!("sync: local content matches remote v{}, skipping", remote.version);
+                let entries = identity_equal.then(|| {
+                    files.iter().map(|f| StateEntry {
+                        variant_id: f.variant_id.clone(),
+                        raw_path: f.raw_path.clone(),
+                        relative_path: f.relative_path.clone(),
+                        hash: f.hash.clone(),
+                        size_bytes: f.size_bytes,
+                    }).collect()
+                });
                 write_state_logged(
                     shop,
                     object_id,
@@ -793,10 +886,12 @@ pub async fn sync_cloud_save(
                         wine_prefix_path: wine_prefix.map(|p| p.to_string()),
                         updated_at: chrono::Utc::now()
                             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        entries,
                     },
                 );
                 return Ok(SyncResult {
                     ok: true,
+                    conflict: None,
                     snapshot_id: remote.id.clone(),
                     version: remote.version,
                     file_count: files.len() as u64,
@@ -814,7 +909,7 @@ pub async fn sync_cloud_save(
             object_id,
             hostname.as_deref(),
             base_version,
-            &discovered.variants,
+            &variants,
             &files,
             &discovered,
             &aggregate_hash,
@@ -829,7 +924,17 @@ pub async fn sync_cloud_save(
                 {
                     return Err(anyhow!("Committed snapshot is inconsistent"));
                 }
-                result = Some((committed, uploaded_files, skipped_files));
+                let entries = files
+                    .iter()
+                    .map(|f| StateEntry {
+                        variant_id: f.variant_id.clone(),
+                        raw_path: f.raw_path.clone(),
+                        relative_path: f.relative_path.clone(),
+                        hash: f.hash.clone(),
+                        size_bytes: f.size_bytes,
+                    })
+                    .collect();
+                result = Some((committed, uploaded_files, skipped_files, entries));
                 break;
             }
             Err(err) => {
@@ -858,7 +963,7 @@ pub async fn sync_cloud_save(
         }
     }
 
-    let (committed, uploaded_files, skipped_files) =
+    let (committed, uploaded_files, skipped_files, state_entries) =
         result.ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("Commit did not complete")))?;
 
     write_state_logged(
@@ -870,11 +975,13 @@ pub async fn sync_cloud_save(
             aggregate_hash: committed.aggregate_hash.clone(),
             wine_prefix_path: wine_prefix.map(|p| p.to_string()),
             updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            entries: Some(state_entries),
         },
     );
 
     Ok(SyncResult {
         ok: true,
+        conflict: None,
         snapshot_id: committed.snapshot_id,
         version: committed.version,
         file_count: committed.file_count,
@@ -1661,6 +1768,19 @@ pub async fn restore_cloud_save(
                 aggregate_hash: latest.aggregate_hash.clone(),
                 wine_prefix_path: wine_prefix.map(|p| p.to_string()),
                 updated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                entries: Some(
+                    manifest
+                        .files
+                        .iter()
+                        .map(|f| StateEntry {
+                            variant_id: f.variant_id.clone(),
+                            raw_path: f.raw_path.clone(),
+                            relative_path: f.relative_path.clone(),
+                            hash: f.hash.clone(),
+                            size_bytes: f.size_bytes,
+                        })
+                        .collect(),
+                ),
             },
         );
     }
@@ -1730,7 +1850,7 @@ pub async fn check_cloud_save_status(
             // Fast path: if the remote matches the launcher's sync anchor,
             // this device produced it and local drift is newer progress.
             let anchor_matches = crate::hydra::get_sync_anchor(object_id, shop)
-                .is_some_and(|(base_version, _)| base_version == remote.version);
+                .is_some_and(|anchor| anchor.base_version == remote.version);
 
             if anchor_matches {
                 remote_newer = false;
@@ -1744,6 +1864,7 @@ pub async fn check_cloud_save_status(
                         wine_prefix_path: wine_prefix.map(|p| p.to_string()),
                         updated_at: chrono::Utc::now()
                             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        entries: None,
                     },
                 );
             }
@@ -1825,7 +1946,30 @@ pub async fn check_cloud_save_status(
                     remote_newer = false;
 
                     // Self-heal the bookkeeping so later checks skip the
-                    // content comparison.
+                    // content comparison. Entries are only trustworthy when
+                    // identities matched, not on a multiset-only match.
+                    let healed_entries = if let Ok(local_hash) =
+                        build_aggregate_hash(&discovered.variants, &entries)
+                    {
+                        if local_hash == remote.aggregate_hash {
+                            Some(
+                                entries
+                                    .iter()
+                                    .map(|f| StateEntry {
+                                        variant_id: f.variant_id.clone(),
+                                        raw_path: f.raw_path.clone(),
+                                        relative_path: f.relative_path.clone(),
+                                        hash: f.hash.clone(),
+                                        size_bytes: f.size_bytes,
+                                    })
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     write_state_logged(
                         shop,
                         object_id,
@@ -1836,6 +1980,7 @@ pub async fn check_cloud_save_status(
                             wine_prefix_path: wine_prefix.map(|p| p.to_string()),
                             updated_at: chrono::Utc::now()
                                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                            entries: healed_entries,
                         },
                     );
                 }
