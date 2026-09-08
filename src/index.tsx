@@ -301,6 +301,10 @@ export default definePlugin(() => {
 
   getAuth()
     .then((auth) => {
+      if (!auth) {
+        throw new Error("no auth");
+      }
+
       setAuth(auth);
 
       setRoute({
