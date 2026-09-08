@@ -102,7 +102,10 @@ const onAppLifetimeNotification = async (
   const unAppID = notification.unAppID.toString();
 
   const game = library.find((game) => {
-    return game.objectId === unAppID || game.winePrefixPath?.includes(unAppID);
+    return (
+      game.objectId === unAppID ||
+      game.winePrefixPath?.split("/").includes(unAppID)
+    );
   });
 
   if (game) {

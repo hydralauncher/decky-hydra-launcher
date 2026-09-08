@@ -99,8 +99,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         if (!result.ok && result.conflict) {
           setIsSyncing(false);
           const names = result.conflict.map((identity) => {
-            const parts = identity.split("");
-
+            const parts = identity.split("\u0000");
             return parts.slice(1).join("/");
           });
           const resolveAll = (side: "local" | "remote") => {

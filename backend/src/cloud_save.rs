@@ -456,7 +456,7 @@ fn is_valid_hash(value: &str) -> bool {
 
 fn is_safe_relative_path(value: &str) -> bool {
     !value.is_empty()
-        && !value.contains('\\')
+        && !value.contains(['\\', '\0'])
         && !value.starts_with('/')
         && value
             .split('/')
@@ -465,7 +465,7 @@ fn is_safe_relative_path(value: &str) -> bool {
 
 fn is_safe_raw_path(value: &str) -> bool {
     !value.is_empty()
-        && !value.contains('\\')
+        && !value.contains(['\\', '\0'])
         && !value.split('/').any(|segment| segment == "..")
 }
 
