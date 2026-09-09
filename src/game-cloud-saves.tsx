@@ -5,6 +5,7 @@ import { Button, ConfirmModal, PanelSection, Spinner, showModal } from "@decky/u
 import { composeToastLogo, formatBytes } from "./helpers";
 import { useAuthStore, useCloudSaveGuard, useCurrentGame, useUserStore } from "./stores";
 import { restoreCloudSave, syncCloudSave } from "./events";
+import { invalidatePrePlayCache, trackBusy } from "./pre-play-sync";
 import { CheckIcon, CloudIcon } from "./components";
 import { useDate } from "./hooks";
 import { GameCloudSave } from "./game-cloud-save";
@@ -86,12 +87,15 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       setIsSyncing(true);
 
       try {
-        const result = await syncCloudSave(
-          auth,
+        const result = await trackBusy(
           game.objectId,
-          game.winePrefixPath,
-          force,
-          resolutions ?? null
+          syncCloudSave(
+            auth,
+            game.objectId,
+            game.winePrefixPath,
+            force,
+            resolutions ?? null
+          )
         );
 
         if (result.auth) setAuth(result.auth);
@@ -122,6 +126,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         }
 
         useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
+        invalidatePrePlayCache(game.objectId);
 
         toaster.toast({
           title: "Cloud save synced",
@@ -183,10 +188,9 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     });
 
     try {
-      const result = await restoreCloudSave(
-        auth,
+      const result = await trackBusy(
         game.objectId,
-        game.winePrefixPath
+        restoreCloudSave(auth, game.objectId, game.winePrefixPath)
       );
 
       if (result.auth) setAuth(result.auth);
@@ -195,6 +199,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       // keep the guard so auto-sync cannot drop the skipped cloud files.
       if (result.skippedFiles.length === 0) {
         useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
+        invalidatePrePlayCache(game.objectId);
       }
 
       const skippedNote = result.skippedFiles.length

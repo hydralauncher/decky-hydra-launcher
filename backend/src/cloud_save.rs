@@ -1905,6 +1905,10 @@ pub async fn restore_cloud_save(
 pub struct CloudSaveStatus {
     pub ok: bool,
     pub remote_newer: bool,
+    /// True when local saves differ from the last state any local actor
+    /// synced (plugin state or launcher anchor). Auto-restore is only safe
+    /// when the remote is newer and the local side is clean.
+    pub local_dirty: bool,
     pub remote_version: Option<u64>,
     pub local_version: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1945,6 +1949,7 @@ pub async fn check_cloud_save_status(
     };
 
     let mut remote_newer = version_says_newer;
+    let mut discovery: Option<DiscoveryOutput> = None;
 
     if version_says_newer {
         if let Some(remote) = latest {
@@ -1976,7 +1981,8 @@ pub async fn check_cloud_save_status(
         if let Some(remote) = latest {
             // Content checks: identical bytes mean "not newer" regardless of
             // version or identity bookkeeping.
-            if let Ok(discovered) = discover_files(object_id, shop, wine_prefix).await {
+            discovery = discover_files(object_id, shop, wine_prefix).await.ok();
+            if let Some(discovered) = &discovery {
                 let entries: Vec<SnapshotFileEntry> =
                     discovered.files.iter().map(|f| f.entry.clone()).collect();
 
@@ -2089,9 +2095,45 @@ pub async fn check_cloud_save_status(
         }
     }
 
+    // Local drift vs the last synced state: clean means auto-restore cannot
+    // lose progress. Fresh installs (no local files) count as clean.
+    let local_dirty = if remote_newer {
+        let local_blobs: Option<Vec<(String, u64)>> = discovery.as_ref().map(|d| {
+            d.files
+                .iter()
+                .map(|f| (f.entry.hash.clone(), f.entry.size_bytes))
+                .collect()
+        });
+        let base_entries = state
+            .as_ref()
+            .and_then(|s| s.entries.clone())
+            .or_else(|| {
+                crate::hydra::get_sync_anchor(object_id, shop)
+                    .filter(|a| !a.entries.is_empty())
+                    .map(|a| a.entries)
+            });
+        match (local_blobs, base_entries) {
+            // No local save files at all: nothing to lose.
+            (None, _) => false,
+            (Some(blobs), _) if blobs.is_empty() => false,
+            // No base to compare against: assume dirty, stay safe.
+            (Some(_), None) => true,
+            (Some(mut blobs), Some(base)) => {
+                let mut base_blobs: Vec<(String, u64)> =
+                    base.iter().map(|e| (e.hash.clone(), e.size_bytes)).collect();
+                blobs.sort_unstable();
+                base_blobs.sort_unstable();
+                blobs != base_blobs
+            }
+        }
+    } else {
+        false
+    };
+
     Ok(CloudSaveStatus {
         ok: true,
         remote_newer,
+        local_dirty,
         remote_version: latest.map(|s| s.version),
         local_version: state.map(|s| s.version),
         auth: Some(auth),

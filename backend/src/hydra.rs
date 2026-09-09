@@ -45,6 +45,7 @@ struct Game {
     wine_prefix_path: Option<String>,
     automatic_cloud_sync: Option<bool>,
     executable_path: Option<String>,
+    steam_shortcut_app_id: Option<u64>,
 }
 
 fn get_leveldb_snapshot() -> Option<Snapshot> {

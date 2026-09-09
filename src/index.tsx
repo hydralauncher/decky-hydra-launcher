@@ -25,6 +25,12 @@ import {
   logEvent,
   syncCloudSave,
 } from "./events";
+import {
+  invalidatePrePlayCache,
+  registerPrePlaySync,
+  unregisterPrePlaySync,
+  waitForBusy,
+} from "./pre-play-sync";
 import { HydraLogo } from "./components";
 import type { Game, User } from "./api-types";
 
@@ -131,6 +137,9 @@ const onAppLifetimeNotification = async (
         .remoteNewerGames.includes(game.objectId);
 
       if (game.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
+        // Never race an in-flight pre-play restore for the same game.
+        await waitForBusy(game.objectId);
+
         const check = checkCloudSaveStatus(auth, game.objectId, game.winePrefixPath)
           .then((status) => {
             if (status.auth) {
@@ -211,8 +220,13 @@ const onAppLifetimeNotification = async (
 
     const isHydraRunning = await isHydraLauncherRunning();
 
-    // Never decide before the launch-time status check settles.
+    // Never decide before the launch-time status check or an in-flight
+    // restore settles.
     await pendingStatusChecks.get(game.objectId)?.catch(() => {});
+    await waitForBusy(game.objectId);
+
+    // A play session dirties local saves: next page open must re-verify.
+    invalidatePrePlayCache(game.objectId);
 
     const remoteNewer = useCloudSaveGuard
       .getState()
@@ -299,6 +313,8 @@ export default definePlugin(() => {
   const { setLibrary } = useLibraryStore.getState();
   const { setRoute } = useNavigationStore.getState();
 
+  registerPrePlaySync();
+
   getAuth()
     .then((auth) => {
       if (!auth) {
@@ -341,6 +357,7 @@ export default definePlugin(() => {
     content: <Plugin />,
     icon: <HydraLogo />,
     onDismount() {
+      unregisterPrePlaySync();
       removeGameExecutionListener();
 
       if (updateInterval) {

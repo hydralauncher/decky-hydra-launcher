@@ -43,6 +43,7 @@ export interface CloudSaveRestoreResult {
 export interface CloudSaveStatus {
   ok: boolean;
   remoteNewer: boolean;
+  localDirty: boolean;
   remoteVersion: number | null;
   localVersion: number | null;
   auth?: Auth;
@@ -74,6 +75,7 @@ export interface Game {
   winePrefixPath: string | null;
   automaticCloudSync: boolean;
   isDeleted?: boolean;
+  steamShortcutAppId?: number;
 }
 
 export interface User {

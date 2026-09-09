@@ -1,9 +1,11 @@
-import { Button, PanelSection, PanelSectionRow } from "@decky/ui";
+import { Button, PanelSection, PanelSectionRow, ToggleField } from "@decky/ui";
 import { useCallback, useEffect, useMemo } from "react";
 import {
+  useCloudSaveGuard,
   useCurrentGame,
   useLibraryStore,
   useNavigationStore,
+  useSyncSettings,
   useUserStore,
 } from "./stores";
 import { api } from "./hydra-api";
@@ -17,6 +19,8 @@ export function Home() {
   const { hours, minutes, seconds } = usePlaytime();
 
   const { setRoute } = useNavigationStore();
+  const { syncBeforePlay, setSyncBeforePlay } = useSyncSettings();
+  const pendingDecisions = useCloudSaveGuard((state) => state.remoteNewerGames);
 
   const { objectId, gameAssets, setGameAssets } = useCurrentGame();
 
@@ -103,6 +107,36 @@ export function Home() {
       </div>
 
       <PanelSection title="Playing now">{playingNowContent}</PanelSection>
+
+      {pendingDecisions.length > 0 && (
+        <PanelSection title="Save sync decisions needed">
+          {pendingDecisions.map((id) => {
+            const game = library.find((g) => g.objectId === id);
+            if (!game) return null;
+            return (
+              <PanelSectionRow key={id}>
+                <Button
+                  className="library-game"
+                  onClick={() => setRoute({ name: "game", params: { game } })}
+                >
+                  <span className="library-game__title">{game.title}</span>
+                </Button>
+              </PanelSectionRow>
+            );
+          })}
+        </PanelSection>
+      )}
+
+      <PanelSection title="Settings">
+        <PanelSectionRow>
+          <ToggleField
+            label="Sync saves before play"
+            description="Check the cloud save when opening a hydra game's page and restore it when newer."
+            checked={syncBeforePlay}
+            onChange={setSyncBeforePlay}
+          />
+        </PanelSectionRow>
+      </PanelSection>
 
       <PanelSection title="Playable on the Deck">
         <div className="library-games">
