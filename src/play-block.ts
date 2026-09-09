@@ -1,7 +1,7 @@
 import { toaster } from "@decky/api";
 
 import { logEvent } from "./events";
-import { usePlayBlockStore } from "./stores";
+import { useCloudSaveGuard, usePlayBlockStore } from "./stores";
 import { findGameByShortcutId } from "./pre-play-sync";
 
 /**
@@ -64,10 +64,20 @@ const blockEvent = (event: Event) => {
   const now = Date.now();
   if (objectId && now - lastBlockedToast > BLOCKED_TOAST_THROTTLE_MS) {
     lastBlockedToast = now;
-    toaster.toast({
-      title: "Save sync in progress",
-      body: "Play is available as soon as the cloud save finishes syncing.",
-    });
+    const conflicted = useCloudSaveGuard
+      .getState()
+      .remoteNewerGames.includes(objectId);
+    toaster.toast(
+      conflicted
+        ? {
+            title: "Save sync needs a decision",
+            body: "Open the Hydra plugin → Pending decisions to choose which save to keep.",
+          }
+        : {
+            title: "Save sync in progress",
+            body: "Play is available as soon as the cloud save finishes syncing.",
+          }
+    );
     if (!selectorMissLogged.has(`attempt-${objectId}`)) {
       selectorMissLogged.add(`attempt-${objectId}`);
       logEvent(`play block: blocked attempt on ${objectId}`);
