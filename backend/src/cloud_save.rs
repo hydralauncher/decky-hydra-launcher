@@ -1708,6 +1708,9 @@ pub async fn restore_cloud_save(
         {
             continue;
         }
+        if !file.download_url.starts_with("https://") {
+            return Err(anyhow!("Refusing non-HTTPS download URL"));
+        }
         blob_urls
             .entry(file.hash.clone())
             .or_insert_with(|| (file.download_url.clone(), file.size_bytes));

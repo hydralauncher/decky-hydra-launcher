@@ -411,6 +411,10 @@ pub async fn download_game_artifact(
         fs::remove_dir_all(&backup_path)?;
     }
 
+    if !download_url.starts_with("https://") {
+        return Err("Refusing non-HTTPS download URL".into());
+    }
+
     let client = Client::new();
     let mut response = client.get(download_url).send().await?;
 
