@@ -123,11 +123,22 @@ export const engagePlayBlock = (objectId: string) => {
   // predicate layer broke (no candidates vs filtered out vs header missing).
   if (!selectorMissLogged.has(objectId)) {
     const candidates = document.querySelectorAll(`[class*="${PLAY_CLASS_FRAGMENT}"]`).length;
+    const controls = Array.from(
+      document.querySelectorAll<HTMLElement>(`[class*="${PLAY_CLASS_FRAGMENT}"]`)
+    ).filter(
+      (el) =>
+        (el.tagName === "BUTTON" || el.getAttribute("role") === "button") &&
+        el.offsetWidth > 0 &&
+        el.offsetHeight > 0
+    ).length;
+    const inHeader = Array.from(
+      document.querySelectorAll<HTMLElement>(`[class*="${PLAY_CLASS_FRAGMENT}"]`)
+    ).filter((el) => el.closest(`[class*="${APP_HEADER_FRAGMENT}"]`)).length;
     const found = findPlayButton();
     if (!found) {
       selectorMissLogged.add(objectId);
       logEvent(
-        `play block: no Play button for ${objectId} (candidates=${candidates})`
+        `play block: no Play button for ${objectId} (candidates=${candidates} controls=${controls} inHeader=${inHeader})`
       );
     }
   }
