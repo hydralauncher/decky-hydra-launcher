@@ -8,15 +8,18 @@ import { findGameByShortcutId } from "./pre-play-sync";
  * Blocks the Play button on an app page while a save sync/restore is active.
  *
  * Mechanism: document-level capture listeners (click/touchstart/keydown/
- * keyup — Enter activates on keydown, Space on keyup). No React patching:
- * capture survives Steam client updates better and fails open when selectors
- * drift.
+ * keyup — Enter activates on keydown, Space on keyup). No React patching and
+ * no cached nodes: matching runs per event via closest() with a composite
+ * predicate, so Steam re-renders and client updates cannot stale the handle.
  *
- * The selector below was identified on-device; record the tested Steam client
- * version next to it so drift triage is a diff, not rediscovery.
- * Selector: identified on device, Steam client <version> — TODO: fill in.
+ * Selector strategy (CSS-module prefixes are stable; hash suffixes churn per
+ * build): class substring "PlayButton" (required) + button element or
+ * role="button" (required) + header proximity (bonus) + visible (required).
+ * Pick rule: first visible match in the app header, else first visible match.
+ * Tested against Steam client <version — fill in at on-device verification>.
  */
-const PLAY_BUTTON_SELECTOR = '[class*="PlayButton"], [class*="playButton"]';
+const PLAY_CLASS_FRAGMENT = "PlayButton";
+const APP_HEADER_FRAGMENT = "AppDetailsHeader";
 
 export const PLAY_BLOCK_RELEASE_TIMEOUT_MS = 15 * 60 * 1000;
 const BLOCKED_TOAST_THROTTLE_MS = 5_000;
@@ -36,15 +39,39 @@ export const setActiveAppPage = (appId: string | null) => {
 let lastBlockedToast = 0;
 let selectorMissLogged = new Set<string>();
 
+const isVisible = (el: HTMLElement) =>
+  el.offsetWidth > 0 && el.offsetHeight > 0;
+
+// Composite Play-button predicate: survives Steam client rebuilds because it
+// keys on the stable CSS-module prefix, not the hashed suffix.
+export const findPlayButton = (): HTMLElement | null => {
+  const candidates = Array.from(
+    document.querySelectorAll<HTMLElement>(`[class*="${PLAY_CLASS_FRAGMENT}"]`)
+  );
+
+  const isControl = (el: HTMLElement) =>
+    el.tagName === "BUTTON" || el.getAttribute("role") === "button";
+
+  const controls = candidates.filter((el) => isControl(el) && isVisible(el));
+  if (controls.length === 0) return null;
+
+  const inHeader = controls.filter((el) =>
+    el.closest(`[class*="${APP_HEADER_FRAGMENT}"]`)
+  );
+  return (inHeader[0] ?? controls[0]) ?? null;
+};
+
 const isBlockedPlayTarget = (event: Event): boolean => {
   const store = usePlayBlockStore.getState();
   if (!activeAppPageId || store.blockedGames.size === 0) return false;
 
-  const library = activeGameForPage();
-  if (!library || !store.blockedGames.has(library)) return false;
+  const objectId = activeGameForPage();
+  if (!objectId || !store.blockedGames.has(objectId)) return false;
 
   const target = event.target as HTMLElement | null;
-  return Boolean(target?.closest?.(PLAY_BUTTON_SELECTOR));
+  if (!target) return false;
+  const play = findPlayButton();
+  return play ? play.contains(target) : false;
 };
 
 // The app page id is a shortcut appid; the block store keys by objectId.
@@ -92,11 +119,17 @@ export const engagePlayBlock = (objectId: string) => {
 
   usePlayBlockStore.getState().engage(objectId);
 
-  // Probe once per engage: only log drift when the selector is truly absent,
-  // not on every unrelated click.
-  if (!document.querySelector(PLAY_BUTTON_SELECTOR) && !selectorMissLogged.has(objectId)) {
-    selectorMissLogged.add(objectId);
-    logEvent(`play block: selector not found for ${objectId}`);
+  // Probe once per engage with per-stage counts so drift triage shows which
+  // predicate layer broke (no candidates vs filtered out vs header missing).
+  if (!selectorMissLogged.has(objectId)) {
+    const candidates = document.querySelectorAll(`[class*="${PLAY_CLASS_FRAGMENT}"]`).length;
+    const found = findPlayButton();
+    if (!found) {
+      selectorMissLogged.add(objectId);
+      logEvent(
+        `play block: no Play button for ${objectId} (candidates=${candidates})`
+      );
+    }
   }
 
   const timer = setTimeout(() => {
