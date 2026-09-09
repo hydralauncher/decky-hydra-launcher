@@ -296,6 +296,12 @@ const onAppLifetimeNotification = async (
         console.error("Failed to sync cloud save", error);
         logEvent(`auto-sync failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
 
+        // Failed sync with nothing actively protecting the game: release.
+        // Guard-flagged games keep the block until the user resolves.
+        if (!useCloudSaveGuard.getState().remoteNewerGames.includes(game.objectId)) {
+          disengagePlayBlock(game.objectId);
+        }
+
         if (error instanceof Error && error.message.includes("remote-newer")) {
           // Another device synced since the launch check: suppress auto-sync
           // and let the user decide.

@@ -45,7 +45,22 @@ struct Game {
     wine_prefix_path: Option<String>,
     automatic_cloud_sync: Option<bool>,
     executable_path: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
     steam_shortcut_app_id: Option<u64>,
+}
+
+// Launcher schema says number; tolerate a string so a schema change degrades
+// the feature instead of dropping the game from the library.
+fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(value.and_then(|v| match v {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }))
 }
 
 fn get_leveldb_snapshot() -> Option<Snapshot> {

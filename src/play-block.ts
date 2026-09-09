@@ -44,14 +44,7 @@ const isBlockedPlayTarget = (event: Event): boolean => {
   if (!library || !store.blockedGames.has(library)) return false;
 
   const target = event.target as HTMLElement | null;
-  const hit = target?.closest?.(PLAY_BUTTON_SELECTOR);
-  if (!hit && !selectorMissLogged.has(library)) {
-    // Selector likely drifted after a client update — fail open, but log it
-    // so the drift is visible in the plugin log.
-    selectorMissLogged.add(library);
-    logEvent(`play block: selector not found for ${library}`);
-  }
-  return Boolean(hit);
+  return Boolean(target?.closest?.(PLAY_BUTTON_SELECTOR));
 };
 
 // The app page id is a shortcut appid; the block store keys by objectId.
@@ -83,7 +76,18 @@ const blockEvent = (event: Event) => {
 };
 
 export const engagePlayBlock = (objectId: string) => {
+  // Re-engage must not leak the previous timer.
+  const existing = releaseTimers.get(objectId);
+  if (existing) clearTimeout(existing);
+
   usePlayBlockStore.getState().engage(objectId);
+
+  // Probe once per engage: only log drift when the selector is truly absent,
+  // not on every unrelated click.
+  if (!document.querySelector(PLAY_BUTTON_SELECTOR) && !selectorMissLogged.has(objectId)) {
+    selectorMissLogged.add(objectId);
+    logEvent(`play block: selector not found for ${objectId}`);
+  }
 
   const timer = setTimeout(() => {
     releaseTimers.delete(objectId);

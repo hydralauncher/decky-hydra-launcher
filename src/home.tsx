@@ -110,7 +110,9 @@ export function Home() {
 
       {pendingDecisions.length > 0 && (
         <PanelSection title="Save sync decisions needed">
-          {pendingDecisions.map((id) => {
+          {pendingDecisions
+            .filter((id) => library.some((g) => g.objectId === id))
+            .map((id) => {
             const game = library.find((g) => g.objectId === id);
             if (!game) return null;
             return (
