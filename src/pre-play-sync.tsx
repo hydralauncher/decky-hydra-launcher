@@ -16,6 +16,11 @@ import {
   useSyncSettings,
   useUserStore,
 } from "./stores";
+import {
+  disengagePlayBlock,
+  engagePlayBlock,
+  setActiveAppPage,
+} from "./play-block";
 import { composeToastLogo } from "./helpers";
 
 // In-flight sync/restore operations, keyed by objectId. The launch/exit
@@ -43,7 +48,7 @@ export const trackBusy = <T,>(objectId: string, work: Promise<T>): Promise<T> =>
 export const waitForBusy = (objectId: string): Promise<unknown> | undefined =>
   busy.get(objectId)?.catch(() => {});
 
-const findGameByShortcut = (appId: string): Game | undefined =>
+export const findGameByShortcutId = (appId: string): Game | undefined =>
   useLibraryStore
     .getState()
     .library.find(
@@ -53,12 +58,12 @@ const findGameByShortcut = (appId: string): Game | undefined =>
 const onGamePageOpen = async (appId: string) => {
   if (!useSyncSettings.getState().syncBeforePlay) return;
 
-  let game = findGameByShortcut(appId);
+  let game = findGameByShortcutId(appId);
   if (!game) {
     // Shortcut may have been recreated since the last library load; refresh
     // once before giving up.
     useLibraryStore.getState().setLibrary(await getLibrary());
-    game = findGameByShortcut(appId);
+    game = findGameByShortcutId(appId);
     if (!game) return;
   }
 
@@ -92,6 +97,7 @@ const onGamePageOpen = async (appId: string) => {
         logo: composeToastLogo(game.iconUrl),
       });
       logEvent(`auto-restore start: ${game.objectId} (remote v${status.remoteVersion})`);
+      engagePlayBlock(game.objectId);
 
       try {
         const result = await trackBusy(
@@ -123,6 +129,8 @@ const onGamePageOpen = async (appId: string) => {
           title: "Cloud save sync failed",
           body: `Could not restore the cloud save for ${game.title}. Your local save was not modified.`,
         });
+      } finally {
+        disengagePlayBlock(game.objectId);
       }
       return;
     }
@@ -130,12 +138,13 @@ const onGamePageOpen = async (appId: string) => {
     // Local progress would be lost by an automatic restore: notify once and
     // let the user resolve it from the plugin.
     useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+    engagePlayBlock(game.objectId);
     if (!notifiedThisSession.has(game.objectId)) {
       notifiedThisSession.add(game.objectId);
       logEvent(`pre-play conflict notice: ${game.objectId}`);
       toaster.toast({
         title: "Save sync needs a decision",
-        body: `${game.title} has save changes both locally and in the cloud. Open the Hydra plugin to choose which to keep.`,
+        body: `${game.title} has save changes both locally and in the cloud. Open the Hydra plugin → Pending decisions to choose which to keep.`,
         logo: composeToastLogo(game.iconUrl),
       });
     }
@@ -150,12 +159,26 @@ const onGamePageOpen = async (appId: string) => {
 
 const AppPageSync = ({ appid }: { appid?: string }) => {
   useEffect(() => {
+    setActiveAppPage(appid ? String(appid) : null);
+    return () => setActiveAppPage(null);
+  }, [appid]);
+
+  useEffect(() => {
     if (appid) onGamePageOpen(String(appid));
   }, [appid]);
   return null;
 };
 
 let patchHandle: ((route: any) => any) | null = null;
+
+// Guard resolution (manual sync/restore) releases any block.
+useCloudSaveGuard.subscribe((state, prev) => {
+  for (const id of prev.remoteNewerGames) {
+    if (!state.remoteNewerGames.includes(id)) {
+      disengagePlayBlock(id);
+    }
+  }
+});
 
 export const registerPrePlaySync = () => {
   const patch = (route: any) => {

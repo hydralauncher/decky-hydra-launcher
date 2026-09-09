@@ -31,6 +31,11 @@ import {
   unregisterPrePlaySync,
   waitForBusy,
 } from "./pre-play-sync";
+import {
+  disengagePlayBlock,
+  registerPlayBlock,
+  unregisterPlayBlock,
+} from "./play-block";
 import { HydraLogo } from "./components";
 import type { Game, User } from "./api-types";
 
@@ -126,6 +131,10 @@ const onAppLifetimeNotification = async (
       setObjectId(game.objectId);
       setRemoteId(game.remoteId);
       setStartedAt(startedAt);
+
+      // Bypassed launch (recents/home): the page block is irrelevant now;
+      // the post-exit guard covers the session.
+      disengagePlayBlock(game.objectId);
 
       // Pre-launch guard: the plugin cannot block a Steam launch, so when the
       // remote snapshot is newer — or its state is unknown — we suppress this
@@ -282,6 +291,7 @@ const onAppLifetimeNotification = async (
           logo: composeToastLogo(game.iconUrl),
         });
         logEvent(`auto-sync done: ${game.objectId} v${result.version}`);
+        disengagePlayBlock(game.objectId);
       } catch (error: unknown) {
         console.error("Failed to sync cloud save", error);
         logEvent(`auto-sync failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
@@ -314,6 +324,7 @@ export default definePlugin(() => {
   const { setRoute } = useNavigationStore.getState();
 
   registerPrePlaySync();
+  registerPlayBlock();
 
   getAuth()
     .then((auth) => {
@@ -358,6 +369,7 @@ export default definePlugin(() => {
     icon: <HydraLogo />,
     onDismount() {
       unregisterPrePlaySync();
+      unregisterPlayBlock();
       removeGameExecutionListener();
 
       if (updateInterval) {
