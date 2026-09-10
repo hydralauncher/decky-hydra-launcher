@@ -586,31 +586,51 @@ impl GameRules {
 
     ) -> Option<RuleMatch<'a>> {
 
-        self.rules
+        let mut best: Option<(&CompiledRule, Option<String>)> = None;
 
+        for (rule, store_user) in self
+            .rules
             .iter()
-
             .filter(|rule| rule.is_applicable(windows_compat, shop))
-
             .filter_map(|rule| {
-
                 rule.matches(tokenized_path)
-
                     .map(|store_user| (rule, store_user))
-
             })
+        {
 
-            .max_by_key(|(rule, _)| rule.raw_path.len())
+            let dir_rank = (rule.kind == RuleKind::Dir) as usize;
 
-            .map(|(rule, store_user)| RuleMatch {
+            let replace = match &best {
 
-                raw_path: &rule.raw_path,
+                None => true,
 
-                kind: &rule.kind,
+                Some((current, _)) => {
 
-                store_user,
+                    let current_dir_rank = (current.kind == RuleKind::Dir) as usize;
 
-            })
+                    (dir_rank, rule.raw_path.len()) > (current_dir_rank, current.raw_path.len())
+
+                }
+
+            };
+
+            if replace {
+
+                best = Some((rule, store_user));
+
+            }
+
+        }
+
+        best.map(|(rule, store_user)| RuleMatch {
+
+            raw_path: &rule.raw_path,
+
+            kind: &rule.kind,
+
+            store_user,
+
+        })
 
     }
 
@@ -783,6 +803,96 @@ mod tests {
         assert_eq!(rel, "S0000.sl2");
 
         assert_eq!(join_restore_path(&raw, &rel), raw);
+
+    }
+
+    #[test]
+
+    fn dir_rule_wins_over_file_rule_on_overlap() {
+
+        let rules = rules(&[
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves",
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves/settings.json",
+        ]);
+
+        let path =
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves/settings.json";
+
+        let m = rules.match_rule(path, false, "steam").unwrap();
+
+        assert_eq!(
+            m.raw_path,
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves"
+        );
+
+        let (raw, rel) =
+            split_rule_match(m.raw_path, m.kind, path, m.store_user.as_deref());
+
+        assert_eq!(
+            raw,
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves"
+        );
+
+        assert_eq!(rel, "settings.json");
+
+    }
+
+    #[test]
+
+    fn dir_priority_ignores_rule_order() {
+
+        let path =
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves/settings.json";
+
+        let forward = rules(&[
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves",
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves/settings.json",
+        ]);
+
+        let reversed = rules(&[
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves/settings.json",
+            "<home>/AppData/LocalLow/Massive Monster/Cult Of The Lamb/saves",
+        ]);
+
+        assert_eq!(
+            forward.match_rule(path, false, "steam").unwrap().raw_path,
+            reversed.match_rule(path, false, "steam").unwrap().raw_path,
+        );
+
+    }
+
+    #[test]
+
+    fn dir_rule_wins_over_glob_on_overlap() {
+
+        let rules = rules(&["<home>/Game", "<home>/Game/*.sav"]);
+
+        let m = rules
+            .match_rule("<home>/Game/slot1.sav", false, "steam")
+            .unwrap();
+
+        assert_eq!(m.raw_path, "<home>/Game");
+
+    }
+
+    #[test]
+
+    fn custom_binding_still_matches() {
+
+        let rules = rules(&["<winAppData>/Game"]).with_custom_bindings(
+            &[(
+                "<custom><linux>/saves".to_string(),
+                "/data/saves".to_string(),
+                None,
+            )],
+            false,
+        );
+
+        let m = rules
+            .match_rule("<custom><linux>/saves/slot.sav", false, "steam")
+            .unwrap();
+
+        assert_eq!(m.raw_path, "<custom><linux>/saves");
 
     }
 

@@ -28,11 +28,15 @@ pub struct ScanContext {
 
 impl ScanContext {
 
-    pub fn build(object_id: &str, shop: &str, wine_prefix: Option<&str>) -> ScanContext {
+    pub fn build_resolved(
+        object_id: &str,
+        shop: &str,
+        operative: Option<String>,
+    ) -> ScanContext {
 
         let executable_path = crate::hydra::get_game_executable_path(object_id, shop);
 
-        let windows_compat = wine_prefix.is_some()
+        let windows_compat = operative.is_some()
 
             && executable_path
 
@@ -42,7 +46,7 @@ impl ScanContext {
 
         ScanContext {
 
-            wine_prefix: wine_prefix.map(|p| p.to_string()),
+            wine_prefix: operative,
 
             shop: shop.to_string(),
 

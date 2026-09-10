@@ -452,15 +452,11 @@ fn shortcuts_vdf_paths() -> Vec<PathBuf> {
 
     let mut paths = Vec::new();
 
-    if let Some(home) = dirs::home_dir() {
+    for root in steam_roots() {
 
-        for base in [".local/share/Steam", ".steam/steam", ".steam/root"] {
+        let userdata = root.join("userdata");
 
-            let Ok(users) = std::fs::read_dir(home.join(base).join("userdata")) else {
-
-                continue;
-
-            };
+        if let Ok(users) = std::fs::read_dir(userdata) {
 
             for user in users.flatten() {
 
@@ -479,6 +475,159 @@ fn shortcuts_vdf_paths() -> Vec<PathBuf> {
     }
 
     paths
+
+}
+
+fn steam_roots_in(home: &std::path::Path) -> Vec<PathBuf> {
+
+    let mut roots = Vec::new();
+
+    for base in [".local/share/Steam", ".steam/steam", ".steam/root"] {
+
+        let root = home.join(base);
+
+        if !root.is_dir() {
+
+            continue;
+
+        }
+
+        let canonical = std::fs::canonicalize(&root).unwrap_or(root);
+
+        if !roots.contains(&canonical) {
+
+            roots.push(canonical);
+
+        }
+
+    }
+
+    roots
+
+}
+
+fn steam_roots() -> Vec<PathBuf> {
+
+    dirs::home_dir().map(|home| steam_roots_in(&home)).unwrap_or_default()
+
+}
+
+fn compat_prefix_in(roots: &[PathBuf], app_id: u32) -> Option<String> {
+
+    for root in roots {
+
+        let candidate = root
+            .join("steamapps")
+            .join("compatdata")
+            .join(app_id.to_string())
+            .join("pfx");
+
+        if candidate.is_dir() {
+
+            return Some(candidate.to_string_lossy().to_string());
+
+        }
+
+    }
+
+    None
+
+}
+
+fn shortcut_live_in(paths: &[PathBuf], app_id: u32) -> bool {
+
+    let wanted = app_id as i32;
+
+    paths.iter().any(|path| {
+
+        std::fs::read(path)
+
+            .map(|data| {
+
+                parse_shortcuts_vdf(&data)
+                    .iter()
+                    .any(|entry| entry.app_id == wanted)
+
+            })
+
+            .unwrap_or(false)
+
+    })
+
+}
+
+fn select_prefix(
+    windows_exe: bool,
+    compat_prefix: Option<String>,
+    shortcut_live: bool,
+    fallback_prefix: Option<String>,
+) -> Option<String> {
+
+    if !windows_exe {
+
+        return fallback_prefix;
+
+    }
+
+    if shortcut_live {
+
+        if compat_prefix.is_some() {
+
+            return compat_prefix;
+
+        }
+
+        return None;
+
+    }
+
+    fallback_prefix
+
+}
+
+pub fn operative_prefix(
+    object_id: &str,
+    shop: &str,
+    fallback_prefix: Option<&str>,
+) -> Option<String> {
+
+    let fallback = fallback_prefix.map(|p| p.to_string());
+
+    let executable = get_game_executable_path(object_id, shop);
+
+    let windows_exe = executable
+        .as_deref()
+        .is_some_and(|p| p.to_ascii_lowercase().ends_with(".exe"));
+
+    if !windows_exe {
+
+        eprintln!(
+            "prefix: game {shop}:{object_id} native, resolved={}",
+            fallback.as_deref().unwrap_or("none")
+        );
+
+        return fallback;
+
+    }
+
+    let shortcut_id = game_identities()
+        .into_iter()
+        .find(|game| game.object_id == object_id && game.shop == shop)
+        .and_then(|game| game.shortcut_id)
+        .and_then(|id| u32::try_from(id).ok());
+
+    let live = shortcut_id.is_some_and(|id| shortcut_live_in(&shortcuts_vdf_paths(), id));
+
+    let compat = shortcut_id.and_then(|id| compat_prefix_in(&steam_roots(), id));
+
+    let resolved = select_prefix(windows_exe, compat, live, fallback);
+
+    eprintln!(
+        "prefix: game {shop}:{object_id} live={live} resolved={}",
+        resolved.as_deref().unwrap_or("none")
+    );
+
+    resolved
 
 }
 
@@ -826,21 +975,133 @@ pub struct SyncAnchor {
 
 }
 
-pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<SyncAnchor> {
+pub struct AnchorRecord {
+
+    pub anchor: SyncAnchor,
+
+    pub updated_at: String,
+
+}
+
+fn valid_environment_marker(value: &str) -> bool {
+
+    let marker = value.trim().to_lowercase();
+
+    let parts: Vec<&str> = marker.split('-').collect();
+
+    if parts.len() != 5 {
+        return false;
+    }
+
+    let [a, b, c, d, e] = [parts[0], parts[1], parts[2], parts[3], parts[4]];
+
+    if a.len() != 8 || b.len() != 4 || c.len() != 4 || d.len() != 4 || e.len() != 12 {
+        return false;
+    }
+
+    if !marker.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-') {
+        return false;
+    }
+
+    if !('1'..='8').contains(&c.chars().next().unwrap_or('0')) {
+        return false;
+    }
+
+    if !"89ab".contains(d.chars().next().unwrap_or('0')) {
+        return false;
+    }
+
+    true
+
+}
+
+pub fn prefix_environment_id(prefix: Option<&str>) -> Option<String> {
+
+    let prefix = prefix.map(|p| p.trim()).filter(|p| !p.is_empty())?;
+
+    let marker = std::fs::read_to_string(
+        std::path::Path::new(prefix).join(".hydra-cloud-save-environment-id"),
+    )
+    .ok()?;
+
+    let marker = marker.trim().to_lowercase();
+
+    valid_environment_marker(&marker).then_some(marker)
+
+}
+
+fn anchor_key_accepted(
+    parts: &[serde_json::Value],
+    environment_id: Option<&str>,
+) -> bool {
+
+    if parts.len() == 3 {
+        return true;
+    }
+
+    if parts.len() == 5 && parts[3].as_str() == Some("environment") {
+
+        if let Some(key_env) = parts[4].as_str() {
+
+            return environment_id == Some(key_env);
+
+        }
+
+        return false;
+
+    }
+
+    false
+
+}
+
+fn anchor_user_matches(parts: &[serde_json::Value], user_id: &str) -> bool {
+
+    parts.first().and_then(|v| v.as_str()) == Some(user_id)
+
+}
+
+fn current_user_id(snapshot: &mut Snapshot) -> Option<String> {
+
+    let raw = snapshot.db.get(b"user")?;
+
+    serde_json::from_slice::<serde_json::Value>(&raw)
+
+        .ok()?
+
+        .get("id")?
+
+        .as_str()
+
+        .map(|s| s.to_string())
+
+}
+
+pub fn list_sync_anchors(
+    object_id: &str,
+    shop: &str,
+    environment_id: Option<&str>,
+) -> Vec<AnchorRecord> {
 
     let Some(mut snapshot) = get_leveldb_snapshot() else {
 
-        return None;
+        return Vec::new();
+
+    };
+
+    let Some(user_id) = current_user_id(&mut snapshot) else {
+
+        return Vec::new();
 
     };
 
     let Ok(mut iter) = snapshot.db.new_iter() else {
 
-        return None;
+        return Vec::new();
 
     };
 
-    let mut best: Option<(SyncAnchor, String)> = None;
+    let mut out: Vec<AnchorRecord> = Vec::new();
 
     while let Some((key_bytes, value_bytes)) = iter.next() {
 
@@ -858,13 +1119,19 @@ pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<SyncAnchor> {
 
         };
 
-        if parts.len() < 3 {
+        if !anchor_user_matches(&parts, &user_id) {
 
             continue;
 
         }
 
         if parts[1].as_str() != Some(shop) || parts[2].as_str() != Some(object_id) {
+
+            continue;
+
+        }
+
+        if !anchor_key_accepted(&parts, environment_id) {
 
             continue;
 
@@ -887,6 +1154,24 @@ pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<SyncAnchor> {
             continue;
 
         };
+
+        if version < 1 || updated_at.is_empty() {
+
+            continue;
+
+        }
+
+        if parts.len() == 5 {
+
+            let key_env = parts[4].as_str().unwrap_or_default();
+
+            if value.get("environmentId").and_then(|v| v.as_str()) != Some(key_env) {
+
+                continue;
+
+            }
+
+        }
 
         let entries = value
 
@@ -966,25 +1251,35 @@ pub fn get_sync_anchor(object_id: &str, shop: &str) -> Option<SyncAnchor> {
 
         };
 
-        let replace = match &best {
+        out.push(AnchorRecord {
 
-            Some((_, best_updated)) => updated_at > best_updated.as_str(),
+            anchor,
 
-            None => true,
+            updated_at: updated_at.to_string(),
 
-        };
-
-        if replace {
-
-            best = Some((anchor, updated_at.to_string()));
-
-        }
+        });
 
     }
 
     let _ = snapshot.db.close();
 
-    best.map(|(anchor, _)| anchor)
+    out
+
+}
+
+pub fn get_sync_anchor(
+    object_id: &str,
+    shop: &str,
+    environment_id: Option<&str>,
+) -> Option<SyncAnchor> {
+
+    list_sync_anchors(object_id, shop, environment_id)
+
+        .into_iter()
+
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+
+        .map(|record| record.anchor)
 
 }
 
@@ -1391,6 +1686,190 @@ mod shortcut_tests {
         assert!(parse_shortcuts_vdf(b"not vdf at all..........").is_empty());
 
         assert!(parse_shortcuts_vdf(&[]).is_empty());
+
+    }
+
+    #[test]
+
+    fn select_prefix_matrix() {
+
+        let compat = Some("/steamapps/compatdata/10/pfx".to_string());
+
+        let fallback = Some("/wine-prefixes/game".to_string());
+
+        assert_eq!(
+            select_prefix(false, compat.clone(), true, fallback.clone()),
+            fallback
+        );
+
+        assert_eq!(
+            select_prefix(true, compat.clone(), true, fallback.clone()),
+            compat
+        );
+
+        assert_eq!(select_prefix(true, None, true, fallback.clone()), None);
+
+        assert_eq!(
+            select_prefix(true, compat.clone(), false, fallback.clone()),
+            fallback
+        );
+
+        assert_eq!(select_prefix(true, None, false, None), None);
+
+    }
+
+    #[test]
+
+    fn steam_roots_dedupe_symlinks_and_missing() {
+
+        let home = tempfile::tempdir().unwrap();
+
+        let real = home.path().join(".local/share/Steam");
+
+        std::fs::create_dir_all(&real).unwrap();
+
+        let link_parent = home.path().join(".steam");
+
+        std::fs::create_dir(&link_parent).unwrap();
+
+        std::os::unix::fs::symlink(real.clone(), link_parent.join("steam")).unwrap();
+
+        let roots = steam_roots_in(home.path());
+
+        assert_eq!(roots.len(), 1);
+
+        assert_eq!(roots[0], std::fs::canonicalize(&real).unwrap());
+
+    }
+
+    #[test]
+
+    fn shortcut_live_matches_wrapped_appid_across_files() {
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let with_match = dir.path().join("a.vdf");
+
+        std::fs::write(&with_match, fixture_vdf()).unwrap();
+
+        let without_match = dir.path().join("b.vdf");
+
+        std::fs::write(&without_match, b"\x00shortcuts\x00\x08\x08").unwrap();
+
+        let paths = vec![without_match, with_match];
+
+        assert!(shortcut_live_in(&paths, 12345));
+
+        assert!(shortcut_live_in(&paths, 2972030656));
+
+        assert!(!shortcut_live_in(&paths, 99999));
+
+        assert!(!shortcut_live_in(&[dir.path().join("missing.vdf")], 12345));
+
+    }
+
+    #[test]
+
+    fn compat_prefix_first_existing_dir_wins() {
+
+        let home = tempfile::tempdir().unwrap();
+
+        let good = home.path().join("steamapps/compatdata/10/pfx");
+
+        std::fs::create_dir_all(&good).unwrap();
+
+        let roots = vec![home.path().join("missing"), home.path().to_path_buf()];
+
+        assert_eq!(
+            compat_prefix_in(&roots, 10),
+            Some(good.to_string_lossy().to_string())
+        );
+
+        assert_eq!(compat_prefix_in(&roots, 11), None);
+
+    }
+
+    #[test]
+
+    fn anchor_user_matches_first_key_part_only() {
+
+        let owned: Vec<serde_json::Value> =
+            serde_json::from_str(r#"["n5zKXo0j","steam","1313140"]"#).unwrap();
+
+        assert!(anchor_user_matches(&owned, "n5zKXo0j"));
+
+        assert!(!anchor_user_matches(&owned, "75BWoNvj"));
+
+        assert!(!anchor_user_matches(&owned, ""));
+
+    }
+
+    #[test]
+
+    fn anchor_key_accepts_legacy_and_own_environment_only() {
+
+        let legacy: Vec<serde_json::Value> =
+            serde_json::from_str(r#"["user","steam","1313140"]"#).unwrap();
+
+        assert!(anchor_key_accepted(&legacy, None));
+
+        assert!(anchor_key_accepted(&legacy, Some("env-a")));
+
+        let own: Vec<serde_json::Value> = serde_json::from_str(
+            r#"["user","steam","1313140","environment","env-a"]"#,
+        )
+        .unwrap();
+
+        assert!(anchor_key_accepted(&own, Some("env-a")));
+
+        assert!(!anchor_key_accepted(&own, None));
+
+        assert!(!anchor_key_accepted(&own, Some("env-b")));
+
+        let short: Vec<serde_json::Value> =
+            serde_json::from_str(r#"["user","steam"]"#).unwrap();
+
+        assert!(!anchor_key_accepted(&short, None));
+
+        let mistyped: Vec<serde_json::Value> = serde_json::from_str(
+            r#"["user","steam","1313140","environments","env-a"]"#,
+        )
+        .unwrap();
+
+        assert!(!anchor_key_accepted(&mistyped, Some("env-a")));
+
+    }
+
+    #[test]
+
+    fn prefix_environment_id_reads_valid_marker_only() {
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let prefix = dir.path().to_str().unwrap().to_string();
+
+        assert_eq!(prefix_environment_id(Some(&prefix)), None);
+
+        std::fs::write(
+            dir.path().join(".hydra-cloud-save-environment-id"),
+            "not-a-uuid\n",
+        )
+        .unwrap();
+
+        assert_eq!(prefix_environment_id(Some(&prefix)), None);
+
+        std::fs::write(
+            dir.path().join(".hydra-cloud-save-environment-id"),
+            "123e4567-e89b-12d3-a456-426614174000\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            prefix_environment_id(Some(&prefix)),
+            Some("123e4567-e89b-12d3-a456-426614174000".to_string())
+        );
+
+        assert_eq!(prefix_environment_id(None), None);
 
     }
 

@@ -263,38 +263,6 @@ export const registerPrePlaySync = () => {
   const patch = (route: any) => {
     if (!route || route[WRAPPED]) return route;
     logEvent(`pre-play patch applied: shape=${routeShape(route)}`);
-    if (route.component) {
-      const Original = route.component;
-      return {
-        ...route,
-        [WRAPPED]: true,
-        component: (props: any) =>
-          withSyncTracking(Original ? <Original {...props} /> : null, props),
-      };
-    }
-    if (typeof route.render === "function") {
-      const fn = route.render;
-      return {
-        ...route,
-        [WRAPPED]: true,
-        render: (props: any) => withSyncTracking(fn(props), props),
-      };
-    }
-    if (typeof route.renderFunc === "function") {
-      const fn = route.renderFunc;
-      return {
-        ...route,
-        [WRAPPED]: true,
-        renderFunc: (props: any) => withSyncTracking(fn(props), props),
-      };
-    }
-    if (route.element !== undefined && route.element !== null) {
-      return {
-        ...route,
-        [WRAPPED]: true,
-        element: withSyncTracking(route.element, {}),
-      };
-    }
     if (route.children !== undefined && route.children !== null) {
       const children = route.children;
       return {

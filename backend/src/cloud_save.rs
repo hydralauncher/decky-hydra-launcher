@@ -530,17 +530,99 @@ fn state_dir() -> Result<PathBuf> {
 
 }
 
-fn state_path(shop: &str, object_id: &str) -> Result<PathBuf> {
+fn lexical_path_segments(path: &str) -> String {
 
-    if !object_id
+    let mut out: Vec<&str> = Vec::new();
 
-        .chars()
+    let absolute = path.starts_with('/');
 
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    for segment in path.split('/') {
 
-    {
+        if segment.is_empty() || segment == "." {
 
-        return Err(anyhow!("Invalid object id"));
+            continue;
+
+        }
+
+        if segment == ".." {
+
+            out.pop();
+
+            continue;
+
+        }
+
+        out.push(segment);
+
+    }
+
+    let mut cleaned = out.join("/");
+
+    if absolute {
+
+        cleaned.insert(0, '/');
+
+    }
+
+    cleaned
+
+}
+
+fn prefix_key(wine_prefix: Option<&str>) -> String {
+
+    let path = wine_prefix.map(|p| p.trim()).filter(|p| !p.is_empty());
+
+    let Some(path) = path else {
+
+        return "none".to_string();
+
+    };
+
+    let normalized = path.replace('\\', "/");
+
+    let normalized = lexical_path_segments(&normalized);
+
+    let normalized = normalized.trim_end_matches('/').to_string();
+
+    let canonical = std::fs::canonicalize(&normalized)
+
+        .map(|c| c.to_string_lossy().replace('\\', "/"))
+
+        .unwrap_or(normalized);
+
+    format!("{:x}", Sha256::digest(canonical.as_bytes()))[..16].to_string()
+
+}
+
+fn valid_state_segment(value: &str) -> bool {
+
+    !value.is_empty()
+
+        && value
+
+            .chars()
+
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+
+}
+
+fn state_path(shop: &str, object_id: &str, key: &str) -> Result<PathBuf> {
+
+    if !valid_state_segment(shop) || !valid_state_segment(object_id) {
+
+        return Err(anyhow!("Invalid game identity"));
+
+    }
+
+    Ok(state_dir()?.join(format!("{shop}-{object_id}@{key}.json")))
+
+}
+
+fn legacy_state_path(shop: &str, object_id: &str) -> Result<PathBuf> {
+
+    if !valid_state_segment(shop) || !valid_state_segment(object_id) {
+
+        return Err(anyhow!("Invalid game identity"));
 
     }
 
@@ -548,9 +630,7 @@ fn state_path(shop: &str, object_id: &str) -> Result<PathBuf> {
 
 }
 
-fn read_state(shop: &str, object_id: &str) -> Option<CloudSaveState> {
-
-    let path = state_path(shop, object_id).ok()?;
+fn read_state_file(path: PathBuf) -> Option<CloudSaveState> {
 
     let content = std::fs::read_to_string(path).ok()?;
 
@@ -558,13 +638,55 @@ fn read_state(shop: &str, object_id: &str) -> Option<CloudSaveState> {
 
 }
 
-fn write_state(shop: &str, object_id: &str, state: &CloudSaveState) -> Result<()> {
+fn has_keyed_state(shop: &str, object_id: &str) -> bool {
+
+    let prefix = format!("{shop}-{object_id}@");
+
+    let Ok(dir) = state_dir().and_then(|d| std::fs::read_dir(d).map_err(|e| anyhow!("{e}"))) else {
+
+        return false;
+
+    };
+
+    dir.flatten().any(|entry| {
+
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        name.starts_with(&prefix) && name.ends_with(".json")
+
+    })
+
+}
+
+fn read_state(shop: &str, object_id: &str, key: &str) -> Option<CloudSaveState> {
+
+    if let Ok(path) = state_path(shop, object_id, key) {
+
+        if let Some(state) = read_state_file(path) {
+
+            return Some(state);
+
+        }
+
+    }
+
+    if has_keyed_state(shop, object_id) {
+
+        return None;
+
+    }
+
+    legacy_state_path(shop, object_id).ok().and_then(read_state_file)
+
+}
+
+fn write_state(shop: &str, object_id: &str, key: &str, state: &CloudSaveState) -> Result<()> {
 
     let dir = state_dir()?;
 
     std::fs::create_dir_all(&dir)?;
 
-    let path = state_path(shop, object_id)?;
+    let path = state_path(shop, object_id, key)?;
 
     std::fs::write(path, serde_json::to_string_pretty(state)?)?;
 
@@ -572,11 +694,25 @@ fn write_state(shop: &str, object_id: &str, state: &CloudSaveState) -> Result<()
 
 }
 
-fn write_state_logged(shop: &str, object_id: &str, state: &CloudSaveState) {
+fn write_state_logged(shop: &str, object_id: &str, key: &str, state: &CloudSaveState) {
 
-    if let Err(err) = write_state(shop, object_id, state) {
+    match write_state(shop, object_id, key, state) {
 
-        eprintln!("Failed to persist cloud save state: {err:#}");
+        Ok(()) => {
+
+            if let Ok(legacy) = legacy_state_path(shop, object_id) {
+
+                let _ = std::fs::remove_file(legacy);
+
+            }
+
+        }
+
+        Err(err) => {
+
+            eprintln!("Failed to persist cloud save state: {err:#}");
+
+        }
 
     }
 
@@ -930,11 +1066,15 @@ async fn discover_files(
 
     shop: &str,
 
-    wine_prefix: Option<&str>,
+    operative: Option<&str>,
 
 ) -> Result<DiscoveryOutput> {
 
-    let ctx = crate::scanner::ScanContext::build(object_id, shop, wine_prefix);
+    let ctx = crate::scanner::ScanContext::build_resolved(
+        object_id,
+        shop,
+        operative.map(|p| p.to_string()),
+    );
 
     let bindings = ctx.custom_paths.clone();
 
@@ -1164,6 +1304,8 @@ pub async fn sync_cloud_save(
 
     let mut client = hydra_client(&auth)?;
 
+    let operative = crate::hydra::operative_prefix(object_id, shop, wine_prefix);
+
     let hostname = hostname::get()
 
         .map(|h| h.to_string_lossy().to_string())
@@ -1178,7 +1320,7 @@ pub async fn sync_cloud_save(
 
     for attempt in 0..2 {
 
-        let discovered = match discover_files(object_id, shop, wine_prefix).await {
+        let discovered = match discover_files(object_id, shop, operative.as_deref()).await {
 
             Ok(discovered) => discovered,
 
@@ -1218,7 +1360,49 @@ pub async fn sync_cloud_save(
 
             if let Some(latest) = snapshots.last() {
 
-                let state = read_state(shop, object_id);
+                let mut state = read_state(shop, object_id, &prefix_key(operative.as_deref()));
+
+                if let Some(local) = state.as_ref() {
+
+                    if is_series_reset(latest.version, local.version) {
+
+                        let local_version = local.version;
+
+                        eprintln!(
+                            "sync: remote v{} older than state v{}, rebasing state (series reset)",
+                            latest.version, local_version
+                        );
+
+                        let rebased = CloudSaveState {
+
+                            snapshot_id: latest.id.clone(),
+
+                            version: latest.version,
+
+                            aggregate_hash: latest.aggregate_hash.clone(),
+
+                            wine_prefix_path: wine_prefix.map(|p| p.to_string()),
+
+                            updated_at: chrono::Utc::now()
+
+                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+
+                            entries: None,
+
+                        };
+
+                        write_state_logged(
+                            shop,
+                            object_id,
+                            &prefix_key(operative.as_deref()),
+                            &rebased,
+                        );
+
+                        state = Some(rebased);
+
+                    }
+
+                }
 
                 let remote_newer = match &state {
 
@@ -1236,7 +1420,11 @@ pub async fn sync_cloud_save(
 
                 };
 
-                let anchor = crate::hydra::get_sync_anchor(object_id, shop);
+                let anchor = crate::hydra::get_sync_anchor(
+                    object_id,
+                    shop,
+                    crate::hydra::prefix_environment_id(operative.as_deref()).as_deref(),
+                );
 
                 let anchor_matches = anchor
 
@@ -1574,7 +1762,7 @@ pub async fn sync_cloud_save(
 
                 } else {
 
-                    read_state(shop, object_id).and_then(|s| s.entries)
+                    read_state(shop, object_id, &prefix_key(operative.as_deref())).and_then(|s| s.entries)
 
                 };
 
@@ -1583,6 +1771,8 @@ pub async fn sync_cloud_save(
                     shop,
 
                     object_id,
+
+                    &prefix_key(operative.as_deref()),
 
                     &CloudSaveState {
 
@@ -1755,6 +1945,8 @@ pub async fn sync_cloud_save(
         shop,
 
         object_id,
+
+        &prefix_key(operative.as_deref()),
 
         &CloudSaveState {
 
@@ -2616,6 +2808,8 @@ pub async fn restore_cloud_save(
 
     let client = hydra_client(&auth)?;
 
+    let operative = crate::hydra::operative_prefix(object_id, shop, wine_prefix);
+
     let snapshots = list_snapshots(&client, shop, object_id).await?;
 
     let latest = snapshots
@@ -2716,7 +2910,7 @@ pub async fn restore_cloud_save(
 
     .context("Invalid download URLs response")?;
 
-    let wine_user_name = wine_prefix.and_then(|prefix| {
+    let wine_user_name = operative.as_deref().and_then(|prefix| {
 
         get_windows_like_user_profile_path(prefix)
 
@@ -2758,7 +2952,7 @@ pub async fn restore_cloud_save(
 
     let executable_path = crate::hydra::get_game_executable_path(object_id, shop);
 
-    let windows_compat = wine_prefix.is_some()
+    let windows_compat = operative.is_some()
 
         && executable_path
 
@@ -2768,7 +2962,7 @@ pub async fn restore_cloud_save(
 
     let context = RestoreContext {
 
-        wine_prefix: wine_prefix.map(|p| p.to_string()),
+        wine_prefix: operative.clone(),
 
         wine_user_name,
 
@@ -3116,6 +3310,8 @@ pub async fn restore_cloud_save(
 
             object_id,
 
+            &prefix_key(operative.as_deref()),
+
             &CloudSaveState {
 
                 snapshot_id: manifest.snapshot.id.clone(),
@@ -3200,6 +3396,183 @@ pub struct CloudSaveStatus {
 
 }
 
+const ANCHOR_OVERLAP_MIN: f64 = 0.5;
+
+fn blob_multiset_eq(a: &[(String, u64)], b: &[(String, u64)]) -> bool {
+
+    let mut x = a.to_vec();
+
+    let mut y = b.to_vec();
+
+    x.sort_unstable();
+
+    y.sort_unstable();
+
+    x == y
+
+}
+
+fn overlap_score(
+    local: &[(String, String, String, String, u64)],
+    base: &[StateEntry],
+    excluded: &std::collections::HashSet<String>,
+) -> f64 {
+
+    use std::collections::{HashMap, HashSet};
+
+    let base_map: HashMap<(String, String, String), (String, u64)> = base
+        .iter()
+        .filter(|e| {
+            !excluded.contains(&format!(
+                "{}\u{0}{}\u{0}{}",
+                e.variant_id, e.raw_path, e.relative_path
+            ))
+        })
+        .map(|e| {
+            (
+                (
+                    e.variant_id.clone(),
+                    e.raw_path.clone(),
+                    e.relative_path.clone(),
+                ),
+                (e.hash.clone(), e.size_bytes),
+            )
+        })
+        .collect();
+
+    let mut union: HashSet<(String, String, String)> =
+        base_map.keys().cloned().collect();
+
+    let mut shared = 0usize;
+
+    for (variant_id, raw_path, relative_path, hash, size_bytes) in local {
+
+        let id = (variant_id.clone(), raw_path.clone(), relative_path.clone());
+
+        union.insert(id.clone());
+
+        if base_map
+            .get(&id)
+            .is_some_and(|(base_hash, base_size)| {
+                base_hash == hash && *base_size == *size_bytes
+            })
+        {
+
+            shared += 1;
+
+        }
+
+    }
+
+    if union.is_empty() {
+
+        return 0.0;
+
+    }
+
+    shared as f64 / union.len() as f64
+
+}
+
+fn anchor_clears(lineage: usize, base_matches_remote: bool, overlap: f64) -> bool {
+
+    if !base_matches_remote {
+
+        return false;
+
+    }
+
+    if lineage <= 1 {
+
+        return true;
+
+    }
+
+    overlap >= ANCHOR_OVERLAP_MIN
+
+}
+
+fn restore_safe(
+    local: &[(String, String, String, String, u64)],
+    remote: &[(String, String, String, String, u64)],
+) -> bool {
+
+    use std::collections::{HashMap, HashSet};
+
+    let remote_map: HashMap<(String, String, String), (String, u64)> = remote
+        .iter()
+        .map(
+            |(variant_id, raw_path, relative_path, hash, size_bytes)| {
+                (
+                    (
+                        variant_id.clone(),
+                        raw_path.clone(),
+                        relative_path.clone(),
+                    ),
+                    (hash.clone(), *size_bytes),
+                )
+            },
+        )
+        .collect();
+
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+
+    for (variant_id, raw_path, relative_path, hash, size_bytes) in local {
+
+        let id = (variant_id.clone(), raw_path.clone(), relative_path.clone());
+
+        if !seen.insert(id.clone()) {
+
+            continue;
+
+        }
+
+        match remote_map.get(&id) {
+
+            Some((remote_hash, remote_size)) => {
+
+                if remote_hash != hash || *remote_size != *size_bytes {
+
+                    return false;
+
+                }
+
+            }
+
+            None => return false,
+
+        }
+
+    }
+
+    true
+
+}
+
+fn is_series_reset(remote_version: u64, local_version: u64) -> bool {
+
+    remote_version < local_version
+
+}
+
+fn status_local_dirty(remote_newer: bool, fast_forward: bool, dirty_assessed: Option<bool>) -> bool {
+
+    if !remote_newer {
+
+        return false;
+
+    }
+
+    if fast_forward {
+
+        return false;
+
+    }
+
+    dirty_assessed.unwrap_or(true)
+
+}
+
 pub async fn check_cloud_save_status(
 
     auth_json: &str,
@@ -3220,11 +3593,50 @@ pub async fn check_cloud_save_status(
 
     let client = hydra_client(&auth)?;
 
+    let operative = crate::hydra::operative_prefix(object_id, shop, wine_prefix);
+
     let snapshots = list_snapshots(&client, shop, object_id).await?;
 
     let latest = snapshots.last();
 
-    let state = read_state(shop, object_id);
+    let mut state = read_state(shop, object_id, &prefix_key(operative.as_deref()));
+
+    if let (Some(remote), Some(local)) = (latest, state.as_ref()) {
+
+        if is_series_reset(remote.version, local.version) {
+
+            let local_version = local.version;
+
+            eprintln!(
+                "status: remote v{} older than state v{}, rebasing state (series reset)",
+                remote.version, local_version
+            );
+
+            let rebased = CloudSaveState {
+
+                snapshot_id: remote.id.clone(),
+
+                version: remote.version,
+
+                aggregate_hash: remote.aggregate_hash.clone(),
+
+                wine_prefix_path: wine_prefix.map(|p| p.to_string()),
+
+                updated_at: chrono::Utc::now()
+
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+
+                entries: None,
+
+            };
+
+            write_state_logged(shop, object_id, &prefix_key(operative.as_deref()), &rebased);
+
+            state = Some(rebased);
+
+        }
+
+    }
 
     let version_says_newer = match (latest, &state) {
 
@@ -3248,23 +3660,124 @@ pub async fn check_cloud_save_status(
 
     let mut discovery: Option<DiscoveryOutput> = None;
 
+    let mut dirty_assessed: Option<bool> = None;
+
+    let mut fast_forward = false;
+
     if version_says_newer {
 
-        if let Some(remote) = latest {
+        discovery = discover_files(object_id, shop, operative.as_deref()).await.ok();
 
-            let anchor_matches = crate::hydra::get_sync_anchor(object_id, shop)
+        let untouched = match (
+            &discovery,
+            state.as_ref().and_then(|s| s.entries.clone()),
+        ) {
 
-                .is_some_and(|anchor| anchor.base_version == remote.version);
+            (Some(discovered), Some(base)) if !base.is_empty() => {
 
-            if anchor_matches {
+                let local: Vec<(String, u64)> = discovered
+                    .files
+                    .iter()
+                    .map(|f| (f.entry.hash.clone(), f.entry.size_bytes))
+                    .collect();
+
+                let base_blobs: Vec<(String, u64)> = base
+                    .iter()
+                    .map(|e| (e.hash.clone(), e.size_bytes))
+                    .collect();
+
+                blob_multiset_eq(&local, &base_blobs)
+
+            }
+
+            _ => false,
+
+        };
+
+        if untouched {
+
+            fast_forward = true;
+
+            eprintln!(
+                "status: local untouched since state v{}, remote newer, fast-forward safe",
+                state.as_ref().map(|s| s.version).unwrap_or(0)
+            );
+
+        } else if let Some(remote) = latest {
+
+            let anchors = crate::hydra::list_sync_anchors(
+                object_id,
+                shop,
+                crate::hydra::prefix_environment_id(operative.as_deref()).as_deref(),
+            );
+
+            let picked = anchors
+                .iter()
+                .max_by(|a, b| a.updated_at.cmp(&b.updated_at));
+
+            let attribute = match picked {
+
+                Some(record) if record.anchor.base_version == remote.version => {
+
+                    let overlap = match &discovery {
+
+                        Some(discovered) => {
+
+                            let excluded: std::collections::HashSet<String> = record
+                                .anchor
+                                .unresolved_entry_ids
+                                .iter()
+                                .cloned()
+                                .collect();
+
+                            let local: Vec<(String, String, String, String, u64)> =
+                                discovered
+                                    .files
+                                    .iter()
+                                    .map(|f| {
+                                        (
+                                            f.entry.variant_id.clone(),
+                                            f.entry.raw_path.clone(),
+                                            f.entry.relative_path.clone(),
+                                            f.entry.hash.clone(),
+                                            f.entry.size_bytes,
+                                        )
+                                    })
+                                    .collect();
+
+                            overlap_score(&local, &record.anchor.entries, &excluded)
+
+                        }
+
+                        None => 0.0,
+
+                    };
+
+                    anchor_clears(anchors.len(), true, overlap)
+
+                }
+
+                _ => false,
+
+            };
+
+            if attribute {
 
                 remote_newer = false;
+
+                eprintln!(
+                    "status: anchor attributes remote v{} (lineage {})",
+                    remote.version,
+                    anchors.len()
+                );
 
                 write_state_logged(
 
                     shop,
 
                     object_id,
+
+                    &prefix_key(operative.as_deref()),
 
                     &CloudSaveState {
 
@@ -3286,6 +3799,16 @@ pub async fn check_cloud_save_status(
 
                 );
 
+            } else if picked
+                .is_some_and(|record| record.anchor.base_version == remote.version)
+            {
+
+                eprintln!(
+                    "status: anchor overruled for remote v{} (lineage {})",
+                    remote.version,
+                    anchors.len()
+                );
+
             }
 
         }
@@ -3296,7 +3819,11 @@ pub async fn check_cloud_save_status(
 
         if let Some(remote) = latest {
 
-            discovery = discover_files(object_id, shop, wine_prefix).await.ok();
+            if discovery.is_none() {
+
+                discovery = discover_files(object_id, shop, operative.as_deref()).await.ok();
+
+            }
 
             if let Some(discovered) = &discovery {
 
@@ -3402,6 +3929,43 @@ pub async fn check_cloud_save_status(
 
                                 }
 
+                                let remote_entries: Vec<(String, String, String, String, u64)> = manifest
+                                    .files
+                                    .iter()
+                                    .map(|f| {
+                                        (
+                                            f.variant_id.clone(),
+                                            f.raw_path.clone(),
+                                            f.relative_path.clone(),
+                                            f.hash.clone(),
+                                            f.size_bytes,
+                                        )
+                                    })
+                                    .collect();
+
+                                let local_entries: Vec<(String, String, String, String, u64)> = entries
+                                    .iter()
+                                    .map(|f| {
+                                        (
+                                            f.variant_id.clone(),
+                                            f.raw_path.clone(),
+                                            f.relative_path.clone(),
+                                            f.hash.clone(),
+                                            f.size_bytes,
+                                        )
+                                    })
+                                    .collect();
+
+                                let safe = restore_safe(&local_entries, &remote_entries);
+
+                                dirty_assessed = Some(!safe);
+
+                                if !safe {
+
+                                    eprintln!("status: restore unsafe, local dirty");
+
+                                }
+
                             }
 
                         }
@@ -3409,6 +3973,8 @@ pub async fn check_cloud_save_status(
                         Err(err) => {
 
                             eprintln!("status content check failed to fetch manifest: {err:#}");
+
+                            dirty_assessed = Some(true);
 
                         }
 
@@ -3464,27 +4030,29 @@ pub async fn check_cloud_save_status(
 
                     };
 
-                    write_state_logged(
+                write_state_logged(
 
-                        shop,
+                    shop,
 
-                        object_id,
+                    object_id,
 
-                        &CloudSaveState {
+                    &prefix_key(operative.as_deref()),
 
-                            snapshot_id: remote.id.clone(),
+                    &CloudSaveState {
 
-                            version: remote.version,
+                        snapshot_id: remote.id.clone(),
 
-                            aggregate_hash: remote.aggregate_hash.clone(),
+                        version: remote.version,
 
-                            wine_prefix_path: wine_prefix.map(|p| p.to_string()),
+                        aggregate_hash: remote.aggregate_hash.clone(),
 
-                            updated_at: chrono::Utc::now()
+                        wine_prefix_path: wine_prefix.map(|p| p.to_string()),
 
-                                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        updated_at: chrono::Utc::now()
 
-                            entries: healed_entries,
+                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+
+                        entries: healed_entries,
 
                         },
 
@@ -3498,65 +4066,7 @@ pub async fn check_cloud_save_status(
 
     }
 
-    let local_dirty = if remote_newer {
-
-        let local_blobs: Option<Vec<(String, u64)>> = discovery.as_ref().map(|d| {
-
-            d.files
-
-                .iter()
-
-                .map(|f| (f.entry.hash.clone(), f.entry.size_bytes))
-
-                .collect()
-
-        });
-
-        let base_entries = state
-
-            .as_ref()
-
-            .and_then(|s| s.entries.clone())
-
-            .or_else(|| {
-
-                crate::hydra::get_sync_anchor(object_id, shop)
-
-                    .filter(|a| !a.entries.is_empty())
-
-                    .map(|a| a.entries)
-
-            });
-
-        match (local_blobs, base_entries) {
-
-            (None, _) => false,
-
-            (Some(blobs), _) if blobs.is_empty() => false,
-
-            (Some(_), None) => true,
-
-            (Some(mut blobs), Some(base)) => {
-
-                let mut base_blobs: Vec<(String, u64)> =
-
-                    base.iter().map(|e| (e.hash.clone(), e.size_bytes)).collect();
-
-                blobs.sort_unstable();
-
-                base_blobs.sort_unstable();
-
-                blobs != base_blobs
-
-            }
-
-        }
-
-    } else {
-
-        false
-
-    };
+    let local_dirty = status_local_dirty(remote_newer, fast_forward, dirty_assessed);
 
     Ok(CloudSaveStatus {
 
@@ -3581,6 +4091,330 @@ pub async fn check_cloud_save_status(
 mod tests {
 
     use super::*;
+
+    fn test_state_entry(
+        variant_id: &str,
+        raw_path: &str,
+        relative_path: &str,
+        hash: &str,
+        size_bytes: u64,
+    ) -> StateEntry {
+
+        StateEntry {
+
+            variant_id: variant_id.to_string(),
+
+            raw_path: raw_path.to_string(),
+
+            relative_path: relative_path.to_string(),
+
+            hash: hash.to_string(),
+
+            size_bytes,
+
+        }
+
+    }
+
+    #[test]
+
+    fn status_verdict_matrix() {
+
+        assert!(!status_local_dirty(false, false, None));
+
+        assert!(!status_local_dirty(false, false, Some(true)));
+
+        assert!(!status_local_dirty(true, true, None));
+
+        assert!(!status_local_dirty(true, true, Some(true)));
+
+        assert!(status_local_dirty(true, false, None));
+
+        assert!(status_local_dirty(true, false, Some(true)));
+
+        assert!(!status_local_dirty(true, false, Some(false)));
+
+    }
+
+    #[test]
+
+    fn series_reset_flags_remote_older_than_state() {
+
+        assert!(is_series_reset(1, 5));
+
+    }
+
+    #[test]
+
+    fn series_reset_ignores_equal_and_newer_remote() {
+
+        assert!(!is_series_reset(5, 5));
+
+        assert!(!is_series_reset(7, 5));
+
+    }
+
+    #[test]
+
+    fn untouched_multiset_matches_regardless_of_order() {
+
+        let a = vec![("h1".to_string(), 10u64), ("h2".to_string(), 20u64)];
+
+        let b = vec![("h2".to_string(), 20u64), ("h1".to_string(), 10u64)];
+
+        assert!(blob_multiset_eq(&a, &b));
+
+    }
+
+    #[test]
+
+    fn untouched_multiset_rejects_drift() {
+
+        let a = vec![("h1".to_string(), 10u64)];
+
+        let b = vec![("h1".to_string(), 10u64), ("h2".to_string(), 20u64)];
+
+        assert!(!blob_multiset_eq(&a, &b));
+
+        let c = vec![("h1".to_string(), 11u64)];
+
+        assert!(!blob_multiset_eq(&a, &c));
+
+    }
+
+    #[test]
+
+    fn overlap_identical_is_one() {
+
+        let local = vec![("v".to_string(), "r".to_string(), "f".to_string(), "h".to_string(), 4u64)];
+
+        let base = vec![test_state_entry("v", "r", "f", "h", 4)];
+
+        assert_eq!(
+            overlap_score(&local, &base, &std::collections::HashSet::new()),
+            1.0
+        );
+
+    }
+
+    #[test]
+
+    fn overlap_disjoint_is_zero() {
+
+        let local = vec![("v".to_string(), "r".to_string(), "f".to_string(), "h1".to_string(), 4u64)];
+
+        let base = vec![test_state_entry("v", "r", "f", "h2", 4)];
+
+        assert_eq!(
+            overlap_score(&local, &base, &std::collections::HashSet::new()),
+            0.0
+        );
+
+    }
+
+    #[test]
+
+    fn overlap_half_counts_shared_identities() {
+
+        let local = vec![
+            ("v".to_string(), "r".to_string(), "a".to_string(), "h".to_string(), 1u64),
+            ("v".to_string(), "r".to_string(), "b".to_string(), "hx".to_string(), 1u64),
+        ];
+
+        let base = vec![
+            test_state_entry("v", "r", "a", "h", 1),
+            test_state_entry("v", "r", "b", "h", 1),
+        ];
+
+        assert_eq!(
+            overlap_score(&local, &base, &std::collections::HashSet::new()),
+            0.5
+        );
+
+    }
+
+    #[test]
+
+    fn overlap_ignores_excluded_identities() {
+
+        let local = vec![("v".to_string(), "r".to_string(), "f".to_string(), "h".to_string(), 4u64)];
+
+        let base = vec![
+            test_state_entry("v", "r", "f", "h", 4),
+            test_state_entry("v", "r", "other".to_string().as_str(), "x", 1),
+        ];
+
+        let mut excluded = std::collections::HashSet::new();
+
+        excluded.insert("v\u{0}r\u{0}other".to_string());
+
+        assert_eq!(overlap_score(&local, &base, &excluded), 1.0);
+
+    }
+
+    #[test]
+
+    fn overlap_empty_is_zero() {
+
+        let empty: Vec<(String, String, String, String, u64)> = Vec::new();
+
+        assert_eq!(
+            overlap_score(&empty, &[], &std::collections::HashSet::new()),
+            0.0
+        );
+
+    }
+
+    fn file_tuple(
+        variant_id: &str,
+        raw_path: &str,
+        relative_path: &str,
+        hash: &str,
+        size_bytes: u64,
+    ) -> (String, String, String, String, u64) {
+
+        (
+            variant_id.to_string(),
+            raw_path.to_string(),
+            relative_path.to_string(),
+            hash.to_string(),
+            size_bytes,
+        )
+
+    }
+
+    #[test]
+
+    fn restore_safe_empty_local() {
+
+        let remote = vec![file_tuple("v", "r", "f", "h", 1)];
+
+        assert!(restore_safe(&[], &remote));
+
+        assert!(restore_safe(&[], &[]));
+
+    }
+
+    #[test]
+
+    fn restore_safe_identical_and_superset_remote() {
+
+        let local = vec![file_tuple("v", "r", "f", "h", 1)];
+
+        let remote = vec![
+            file_tuple("v", "r", "f", "h", 1),
+            file_tuple("v", "r", "g", "h2", 2),
+        ];
+
+        assert!(restore_safe(&local, &remote));
+
+    }
+
+    #[test]
+
+    fn restore_safe_rejects_divergent_and_absent() {
+
+        let divergent = vec![file_tuple("v", "r", "f", "h2", 1)];
+
+        let base = vec![file_tuple("v", "r", "f", "h1", 1)];
+
+        assert!(!restore_safe(&divergent, &base));
+
+        let missing = vec![file_tuple("v", "r", "gone", "h", 1)];
+
+        assert!(!restore_safe(&missing, &base));
+
+        let resized = vec![file_tuple("v", "r", "f", "h1", 99)];
+
+        assert!(!restore_safe(&resized, &base));
+
+    }
+
+    #[test]
+
+    fn restore_safe_dedupes_local_repeats() {
+
+        let file = file_tuple("v", "r", "f", "h", 1);
+
+        assert!(restore_safe(&[file.clone(), file.clone()], &[file]));
+
+    }
+
+    #[test]
+
+    fn attribution_matrix() {
+
+        assert!(anchor_clears(1, true, 0.0));
+
+        assert!(anchor_clears(0, true, 0.0));
+
+        assert!(!anchor_clears(1, false, 1.0));
+
+        assert!(!anchor_clears(3, true, 0.49));
+
+        assert!(anchor_clears(3, true, 0.5));
+
+        assert!(anchor_clears(2, true, 1.0));
+
+    }
+
+    #[test]
+
+    fn prefix_key_rules() {
+
+        assert_eq!(prefix_key(None), "none");
+
+        assert_eq!(prefix_key(Some("")), "none");
+
+        assert_eq!(prefix_key(Some("   ")), "none");
+
+        assert_eq!(
+            prefix_key(Some("C:\\Games\\X\\")),
+            prefix_key(Some("C:/Games/X"))
+        );
+
+        assert_ne!(
+            prefix_key(Some("/prefix/a")),
+            prefix_key(Some("/prefix/b"))
+        );
+
+        assert_eq!(
+            prefix_key(Some("/prefix//a/./b/../b/")),
+            prefix_key(Some("/prefix/a/b"))
+        );
+
+    }
+
+    #[test]
+
+    fn state_path_rejects_traversal_segments() {
+
+        assert!(state_path("../evil", "1313140", "abc").is_err());
+
+        assert!(state_path("steam", "../../etc", "abc").is_err());
+
+        assert!(state_path("steam", "1313140", "abc").is_ok());
+
+    }
+
+    #[test]
+
+    fn prefix_key_symlink_matches_target() {
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let target = dir.path().join("pfx");
+
+        std::fs::create_dir(&target).unwrap();
+
+        std::os::unix::fs::symlink(&target, dir.path().join("link")).unwrap();
+
+        assert_eq!(
+            prefix_key(Some(target.to_str().unwrap())),
+            prefix_key(Some(dir.path().join("link").to_str().unwrap()))
+        );
+
+    }
 
     #[test]
 

@@ -18,7 +18,7 @@ export const setActiveAppPage = (appId: string | null) => {
 };
 
 let lastBlockedToast = 0;
-let selectorMissLogged = new Set<string>();
+const selectorMissLogged = new Set<string>();
 
 const isVisible = (el: HTMLElement) =>
   el.offsetWidth > 0 && el.offsetHeight > 0;
@@ -92,6 +92,7 @@ export const engagePlayBlock = (objectId: string) => {
   if (existing) clearTimeout(existing);
 
   usePlayBlockStore.getState().engage(objectId);
+  logEvent(`play block: engaged ${objectId}`);
 
   if (!selectorMissLogged.has(objectId)) {
     const candidates = document.querySelectorAll(`[class*="${PLAY_CLASS_FRAGMENT}"]`).length;
@@ -117,7 +118,7 @@ export const engagePlayBlock = (objectId: string) => {
 
   const timer = setTimeout(() => {
     releaseTimers.delete(objectId);
-    usePlayBlockStore.getState().disengage(objectId);
+    disengagePlayBlock(objectId);
     logEvent(`play block: release timeout for ${objectId}`);
     toaster.toast({
       title: "Save sync is taking long",
@@ -129,6 +130,7 @@ export const engagePlayBlock = (objectId: string) => {
 };
 
 export const disengagePlayBlock = (objectId: string) => {
+  if (!usePlayBlockStore.getState().blockedGames.has(objectId)) return;
   const timer = releaseTimers.get(objectId);
   if (timer) {
     clearTimeout(timer);
@@ -137,6 +139,7 @@ export const disengagePlayBlock = (objectId: string) => {
   selectorMissLogged.delete(objectId);
   selectorMissLogged.delete(`attempt-${objectId}`);
   usePlayBlockStore.getState().disengage(objectId);
+  logEvent(`play block: disengaged ${objectId}`);
 };
 
 let registered = false;
