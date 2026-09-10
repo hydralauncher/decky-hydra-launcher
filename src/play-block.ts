@@ -4,20 +4,6 @@ import { logEvent } from "./events";
 import { useCloudSaveGuard, usePlayBlockStore } from "./stores";
 import { findGameByShortcutId } from "./pre-play-sync";
 
-/**
- * Blocks the Play button on an app page while a save sync/restore is active.
- *
- * Mechanism: document-level capture listeners (click/touchstart/keydown/
- * keyup — Enter activates on keydown, Space on keyup). No React patching and
- * no cached nodes: matching runs per event via closest() with a composite
- * predicate, so Steam re-renders and client updates cannot stale the handle.
- *
- * Selector strategy (CSS-module prefixes are stable; hash suffixes churn per
- * build): class substring "PlayButton" (required) + button element or
- * role="button" (required) + header proximity (bonus) + visible (required).
- * Pick rule: first visible match in the app header, else first visible match.
- * Tested against Steam client <version — fill in at on-device verification>.
- */
 const PLAY_CLASS_FRAGMENT = "PlayButton";
 const APP_HEADER_FRAGMENT = "AppDetailsHeader";
 
