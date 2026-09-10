@@ -125,6 +125,283 @@ pub fn get_game_executable_path(object_id: &str, shop: &str) -> Option<String> {
     game.get("executablePath")?.as_str().map(|s| s.to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutResolution {
+    pub object_id: String,
+    pub shop: String,
+    pub source: &'static str,
+}
+
+fn shortcut_id_of(value: &serde_json::Value) -> Option<u64> {
+    match value.get("steamShortcutAppId") {
+        Some(serde_json::Value::Number(n)) => n.as_u64(),
+        Some(serde_json::Value::String(s)) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn normalize_exe(path: &str) -> String {
+    let trimmed = path.trim();
+    let unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed);
+    unquoted.replace('\\', "/").to_lowercase()
+}
+
+#[derive(Debug)]
+enum VdfNode {
+    Str(String),
+    Int(i32),
+    Dict(Vec<(String, VdfNode)>),
+}
+
+fn read_cstring(data: &[u8], pos: &mut usize) -> Option<String> {
+    let start = *pos;
+    while *pos < data.len() && data[*pos] != 0 {
+        *pos += 1;
+    }
+    if *pos >= data.len() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&data[start..*pos]).to_string();
+    *pos += 1;
+    Some(s)
+}
+
+fn parse_vdf_dict(data: &[u8], pos: &mut usize) -> Option<Vec<(String, VdfNode)>> {
+    let mut out = Vec::new();
+    loop {
+        if *pos >= data.len() {
+            return None;
+        }
+        let kind = data[*pos];
+        *pos += 1;
+        if kind == 0x08 {
+            return Some(out);
+        }
+        let key = read_cstring(data, pos)?;
+        let value = match kind {
+            0x00 => VdfNode::Dict(parse_vdf_dict(data, pos)?),
+            0x01 => VdfNode::Str(read_cstring(data, pos)?),
+            0x02 => {
+                if *pos + 4 > data.len() {
+                    return None;
+                }
+                let v = i32::from_le_bytes(data[*pos..*pos + 4].try_into().ok()?);
+                *pos += 4;
+                VdfNode::Int(v)
+            }
+            0x03 | 0x04 | 0x06 => {
+                if *pos + 4 > data.len() {
+                    return None;
+                }
+                *pos += 4;
+                continue;
+            }
+            0x07 => {
+                if *pos + 8 > data.len() {
+                    return None;
+                }
+                *pos += 8;
+                continue;
+            }
+            0x05 => {
+                while *pos + 1 < data.len() && !(data[*pos] == 0 && data[*pos + 1] == 0) {
+                    *pos += 2;
+                }
+                *pos = (*pos + 2).min(data.len());
+                continue;
+            }
+            _ => return None,
+        };
+        out.push((key, value));
+    }
+}
+
+fn vdf_get<'a>(dict: &'a [(String, VdfNode)], key: &str) -> Option<&'a VdfNode> {
+    dict.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+}
+
+struct ShortcutEntry {
+    app_id: i32,
+    exe: String,
+}
+
+fn parse_shortcuts_vdf(data: &[u8]) -> Vec<ShortcutEntry> {
+    let mut pos = 0;
+    let mut out = Vec::new();
+    let Some(root) = parse_vdf_dict(data, &mut pos) else {
+        return out;
+    };
+    let Some(VdfNode::Dict(shortcuts)) = vdf_get(&root, "shortcuts") else {
+        return out;
+    };
+    for (_, node) in shortcuts {
+        let VdfNode::Dict(fields) = node else {
+            continue;
+        };
+        let (Some(VdfNode::Int(app_id)), Some(VdfNode::Str(exe))) =
+            (vdf_get(fields, "appid"), vdf_get(fields, "Exe"))
+        else {
+            continue;
+        };
+        out.push(ShortcutEntry {
+            app_id: *app_id,
+            exe: exe.clone(),
+        });
+    }
+    out
+}
+
+fn shortcuts_vdf_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        for base in [".local/share/Steam", ".steam/steam", ".steam/root"] {
+            let Ok(users) = std::fs::read_dir(home.join(base).join("userdata")) else {
+                continue;
+            };
+            for user in users.flatten() {
+                let vdf = user.path().join("config/shortcuts.vdf");
+                if vdf.is_file() {
+                    paths.push(vdf);
+                }
+            }
+        }
+    }
+    paths
+}
+
+struct GameIdentity {
+    object_id: String,
+    shop: String,
+    shortcut_id: Option<u64>,
+    executable: Option<String>,
+    wine_prefix: Option<String>,
+}
+
+fn game_identities() -> Vec<GameIdentity> {
+    let mut out = Vec::new();
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+        return out;
+    };
+    if let Ok(mut iter) = snapshot.db.new_iter() {
+        while let Some((key_bytes, value_bytes)) = iter.next() {
+            let Ok(key) = String::from_utf8(key_bytes) else {
+                continue;
+            };
+            if !key.starts_with("!games") {
+                continue;
+            }
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&value_bytes) else {
+                continue;
+            };
+            let Some(object_id) = value.get("objectId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            out.push(GameIdentity {
+                object_id: object_id.to_string(),
+                shop: value
+                    .get("shop")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("steam")
+                    .to_string(),
+                shortcut_id: shortcut_id_of(&value),
+                executable: value
+                    .get("executablePath")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                wine_prefix: value
+                    .get("winePrefixPath")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            });
+        }
+    }
+    let _ = snapshot.db.close();
+    out
+}
+
+pub fn resolve_shortcut_app_id(app_id: u32) -> Option<ShortcutResolution> {
+    let games = game_identities();
+
+    if let Some(game) = games
+        .iter()
+        .find(|g| g.shortcut_id == Some(app_id as u64))
+    {
+        return Some(ShortcutResolution {
+            object_id: game.object_id.clone(),
+            shop: game.shop.clone(),
+            source: "leveldb",
+        });
+    }
+
+    let wanted = app_id as i32;
+    let mut exes: Vec<String> = Vec::new();
+    for path in shortcuts_vdf_paths() {
+        let Ok(data) = std::fs::read(&path) else {
+            continue;
+        };
+        for entry in parse_shortcuts_vdf(&data) {
+            if entry.app_id == wanted {
+                exes.push(entry.exe);
+            }
+        }
+    }
+    if !exes.is_empty() {
+        let normalized: Vec<String> = exes.iter().map(|e| normalize_exe(e)).collect();
+        let mut hits: Vec<&GameIdentity> = games
+            .iter()
+            .filter(|g| {
+                g.executable
+                    .as_deref()
+                    .is_some_and(|e| normalized.contains(&normalize_exe(e)))
+            })
+            .collect();
+        hits.sort_by(|a, b| a.object_id.cmp(&b.object_id));
+        hits.dedup_by(|a, b| a.object_id == b.object_id);
+        match hits.as_slice() {
+            [game] => {
+                return Some(ShortcutResolution {
+                    object_id: game.object_id.clone(),
+                    shop: game.shop.clone(),
+                    source: "shortcuts-vdf",
+                })
+            }
+            [_, _, ..] => {
+                eprintln!("resolve-shortcut: ambiguous exe for appid {app_id}");
+                return None;
+            }
+            [] => {}
+        }
+    }
+
+    let needle = format!("/compatdata/{app_id}/");
+    let mut hits: Vec<&GameIdentity> = games
+        .iter()
+        .filter(|g| {
+            g.wine_prefix
+                .as_deref()
+                .is_some_and(|p| p.replace('\\', "/").contains(&needle))
+        })
+        .collect();
+    hits.sort_by(|a, b| a.object_id.cmp(&b.object_id));
+    hits.dedup_by(|a, b| a.object_id == b.object_id);
+    match hits.as_slice() {
+        [game] => Some(ShortcutResolution {
+            object_id: game.object_id.clone(),
+            shop: game.shop.clone(),
+            source: "prefix-path",
+        }),
+        [_, _, ..] => {
+            eprintln!("resolve-shortcut: ambiguous prefix for appid {app_id}");
+            None
+        }
+        [] => None,
+    }
+}
+
 /// Custom save-path bindings the user configured in the launcher, as
 /// (rawPath, localPath, storeUserId) triples, longest rawPath first.
 /// Read-only: the plugin never writes bindings.
@@ -455,4 +732,81 @@ pub async fn download_game_artifact(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    fn fixture_vdf() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.push(0x00);
+        b.extend_from_slice(b"shortcuts\0");
+        b.push(0x00);
+        b.extend_from_slice(b"0\0");
+        b.push(0x02);
+        b.extend_from_slice(b"appid\0");
+        b.extend_from_slice(&12345i32.to_le_bytes());
+        b.push(0x01);
+        b.extend_from_slice(b"Exe\0");
+        b.extend_from_slice(b"\"C:\\Games\\Foo\\game.exe\"\0");
+        b.push(0x01);
+        b.extend_from_slice(b"AppName\0");
+        b.extend_from_slice(b"Foo\0");
+        b.push(0x08);
+        b.push(0x00);
+        b.extend_from_slice(b"7\0");
+        b.push(0x02);
+        b.extend_from_slice(b"appid\0");
+        b.extend_from_slice(&(2972030656u32 as i32).to_le_bytes());
+        b.push(0x01);
+        b.extend_from_slice(b"Exe\0");
+        b.extend_from_slice(b"/mnt/storage/Games/SB.exe\0");
+        b.push(0x08);
+        b.push(0x08);
+        b.push(0x08);
+        b
+    }
+
+    #[test]
+    fn parses_shortcut_entries() {
+        let entries = parse_shortcuts_vdf(&fixture_vdf());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].app_id, 12345);
+        assert_eq!(entries[0].exe, "\"C:\\Games\\Foo\\game.exe\"");
+        assert_eq!(entries[1].app_id, 2972030656u32 as i32);
+    }
+
+    #[test]
+    fn wrapped_appid_round_trips() {
+        let big: u32 = 2972030656;
+        assert_eq!((big as i32) as u32, big);
+    }
+
+    #[test]
+    fn exe_normalization_agrees_across_formats() {
+        assert_eq!(
+            normalize_exe("\"C:\\Games\\Foo\\game.exe\""),
+            normalize_exe("c:/games/foo/game.exe")
+        );
+        assert_eq!(
+            normalize_exe("  /mnt/storage/Games/SB.exe  "),
+            "/mnt/storage/games/sb.exe"
+        );
+    }
+
+    #[test]
+    fn prefix_needle_is_segment_safe() {
+        let needle = format!("/compatdata/{}/", 10u32);
+        assert!("/x/compatdata/10/pfx".contains(&needle));
+        assert!(!"/x/compatdata/110/pfx".contains(&needle));
+        assert!(!"/x/compatdata/101/pfx".contains(&needle));
+    }
+
+    #[test]
+    fn garbage_vdf_fails_closed() {
+        assert!(parse_shortcuts_vdf(b"\x00shortcuts").is_empty());
+        assert!(parse_shortcuts_vdf(b"not vdf at all..........").is_empty());
+        assert!(parse_shortcuts_vdf(&[]).is_empty());
+    }
 }

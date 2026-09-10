@@ -1,11 +1,12 @@
 import { routerHook, toaster } from "@decky/api";
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 
 import type { Game } from "./api-types";
 import {
   checkCloudSaveStatus,
   getLibrary,
   logEvent,
+  resolveShortcut,
   restoreCloudSave,
 } from "./events";
 import {
@@ -27,14 +28,27 @@ import { composeToastLogo } from "./helpers";
 // handler awaits these instead of racing them; entries delete on settle.
 const busy = new Map<string, Promise<unknown>>();
 
+const shortcutResolved = new Map<string, string | null>();
+
 // Session caches, invalidated on game exit, guard-flag change, and manual
 // sync/restore.
 const verifiedThisSession = new Set<string>();
 const notifiedThisSession = new Set<string>();
 
+const skipLoggedThisSession = new Set<string>();
+
+const logSkipOnce = (key: string, message: string) => {
+  if (skipLoggedThisSession.has(key)) return;
+  skipLoggedThisSession.add(key);
+  logEvent(`pre-play skip: ${message}`);
+};
+
 export const invalidatePrePlayCache = (objectId: string) => {
   verifiedThisSession.delete(objectId);
   notifiedThisSession.delete(objectId);
+  for (const key of [...skipLoggedThisSession]) {
+    if (key.startsWith(`${objectId}:`)) skipLoggedThisSession.delete(key);
+  }
 };
 
 export const trackBusy = <T,>(objectId: string, work: Promise<T>): Promise<T> => {
@@ -48,34 +62,78 @@ export const trackBusy = <T,>(objectId: string, work: Promise<T>): Promise<T> =>
 export const waitForBusy = (objectId: string): Promise<unknown> | undefined =>
   busy.get(objectId)?.catch(() => {});
 
-export const findGameByShortcutId = (appId: string): Game | undefined =>
-  useLibraryStore
-    .getState()
-    .library.find(
-      (game) => String(game.steamShortcutAppId ?? "") === String(appId)
-    );
+export const findGameByShortcutId = (appId: string): Game | undefined => {
+  const key = String(appId);
+  const library = useLibraryStore.getState().library;
+  const direct = library.find(
+    (game) => String(game.steamShortcutAppId ?? "") === key
+  );
+  if (direct) return direct;
+  const objectId = shortcutResolved.get(key);
+  if (!objectId) return undefined;
+  return library.find((game) => game.objectId === objectId);
+};
 
 const onGamePageOpen = async (appId: string) => {
-  if (!useSyncSettings.getState().syncBeforePlay) return;
-
-  let game = findGameByShortcutId(appId);
-  if (!game) {
-    // Shortcut may have been recreated since the last library load; refresh
-    // once before giving up.
-    useLibraryStore.getState().setLibrary(await getLibrary());
-    game = findGameByShortcutId(appId);
-    if (!game) return;
+  if (!useSyncSettings.getState().syncBeforePlay) {
+    logSkipOnce(`page:${appId}:toggle-off`, `toggle off (page appid ${appId})`);
+    return;
   }
 
-  if (!game.automaticCloudSync) return;
+  let game = findGameByShortcutId(appId);
+  if (!game && !shortcutResolved.has(String(appId))) {
+    try {
+      const resolved = await resolveShortcut(String(appId));
+      shortcutResolved.set(String(appId), resolved?.objectId ?? null);
+      if (resolved) {
+        logSkipOnce(
+          `${resolved.objectId}:match-${resolved.source}`,
+          `shortcut match via ${resolved.source} (${resolved.objectId})`
+        );
+      }
+    } catch (error) {
+      console.error("Shortcut resolve failed", error);
+    }
+    game = findGameByShortcutId(appId);
+  }
+  if (!game) {
+    const mapped = shortcutResolved.get(String(appId));
+    const libraryMissing =
+      mapped != null &&
+      !useLibraryStore.getState().library.some((g) => g.objectId === mapped);
+    if (libraryMissing || !shortcutResolved.has(String(appId))) {
+      useLibraryStore.getState().setLibrary(await getLibrary());
+      game = findGameByShortcutId(appId);
+    }
+    if (!game) {
+      logSkipOnce(`page:${appId}:miss`, `no shortcut match for appid ${appId}`);
+      return;
+    }
+  }
+
+  if (!game.automaticCloudSync) {
+    logSkipOnce(`${game.objectId}:auto-sync-off`, `auto-sync off (${game.objectId})`);
+    return;
+  }
   if (verifiedThisSession.has(game.objectId)) return;
-  if (useCurrentGame.getState().objectId === game.objectId) return;
+  if (useCurrentGame.getState().objectId === game.objectId) {
+    logSkipOnce(`${game.objectId}:running`, `game running (${game.objectId})`);
+    return;
+  }
 
   const { auth } = useAuthStore.getState();
   const { hasActiveSubscription } = useUserStore.getState();
-  if (!auth || !hasActiveSubscription) return;
+  if (!auth) {
+    logSkipOnce(`${game.objectId}:no-auth`, `no auth (${game.objectId})`);
+    return;
+  }
+  if (!hasActiveSubscription) {
+    logSkipOnce(`${game.objectId}:no-sub`, `no subscription (${game.objectId})`);
+    return;
+  }
 
   if (busy.has(game.objectId)) {
+    logSkipOnce(`${game.objectId}:busy`, `attach in-flight (${game.objectId})`);
     await waitForBusy(game.objectId);
     return;
   }
@@ -86,6 +144,7 @@ const onGamePageOpen = async (appId: string) => {
 
     if (!status.remoteNewer) {
       verifiedThisSession.add(game.objectId);
+      logEvent(`pre-play verified: ${game.objectId} (remote v${status.remoteVersion ?? "none"})`);
       return;
     }
 
@@ -158,14 +217,21 @@ const onGamePageOpen = async (appId: string) => {
 };
 
 const AppPageSync = ({ appid }: { appid?: string }) => {
-  useEffect(() => {
-    setActiveAppPage(appid ? String(appid) : null);
-    return () => setActiveAppPage(null);
-  }, [appid]);
+  // Some route shapes (children/element) forward no props; parse the hash
+  // route as fallback (Steam uses a hash router: #/library/app/<appid>).
+  const hashAppId =
+    window.location.hash.match(/\/library\/app\/(\d+)/)?.[1];
+  const effectiveAppId = appid ?? hashAppId;
 
   useEffect(() => {
-    if (appid) onGamePageOpen(String(appid));
-  }, [appid]);
+    setActiveAppPage(effectiveAppId ? String(effectiveAppId) : null);
+    logEvent(`pre-play page mount: appid=${effectiveAppId ?? "none"}`);
+    return () => setActiveAppPage(null);
+  }, [effectiveAppId]);
+
+  useEffect(() => {
+    if (effectiveAppId) onGamePageOpen(String(effectiveAppId));
+  }, [effectiveAppId]);
   return null;
 };
 
@@ -180,20 +246,74 @@ useCloudSaveGuard.subscribe((state, prev) => {
   }
 });
 
+const WRAPPED = "__hydraPrePlayWrapped";
+
+function withSyncTracking(rendered: ReactNode, props: any) {
+  return (
+    <>
+      <AppPageSync appid={props?.match?.params?.appid} />
+      {rendered}
+    </>
+  );
+}
+
+function routeShape(route: any): string {
+  if (!route) return "null";
+  if (route.component) return "component";
+  if (typeof route.render === "function") return "render";
+  if (typeof route.renderFunc === "function") return "renderFunc";
+  if (route.element !== undefined && route.element !== null) return "element";
+  return "none:" + Object.keys(route).join(",");
+}
+
 export const registerPrePlaySync = () => {
   const patch = (route: any) => {
-    const Original = route.component;
-    return {
-      ...route,
-      component: function WrappedAppPage(props: any) {
-        return (
-          <>
-            <AppPageSync appid={props?.match?.params?.appid} />
-            {Original ? <Original {...props} /> : null}
-          </>
-        );
-      },
-    };
+    if (!route || route[WRAPPED]) return route;
+    logEvent(`pre-play patch applied: shape=${routeShape(route)}`);
+    if (route.component) {
+      const Original = route.component;
+      return {
+        ...route,
+        [WRAPPED]: true,
+        component: (props: any) =>
+          withSyncTracking(Original ? <Original {...props} /> : null, props),
+      };
+    }
+    if (typeof route.render === "function") {
+      const fn = route.render;
+      return {
+        ...route,
+        [WRAPPED]: true,
+        render: (props: any) => withSyncTracking(fn(props), props),
+      };
+    }
+    if (typeof route.renderFunc === "function") {
+      const fn = route.renderFunc;
+      return {
+        ...route,
+        [WRAPPED]: true,
+        renderFunc: (props: any) => withSyncTracking(fn(props), props),
+      };
+    }
+    if (route.element !== undefined && route.element !== null) {
+      return {
+        ...route,
+        [WRAPPED]: true,
+        element: withSyncTracking(route.element, {}),
+      };
+    }
+    if (route.children !== undefined && route.children !== null) {
+      const children = route.children;
+      return {
+        ...route,
+        [WRAPPED]: true,
+        children:
+          typeof children === "function"
+            ? (props: any) => withSyncTracking(children(props), props)
+            : withSyncTracking(children, {}),
+      };
+    }
+    return route;
   };
   patchHandle = patch;
   routerHook.addPatch("/library/app/:appid", patch as any);

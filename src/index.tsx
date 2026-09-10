@@ -352,7 +352,13 @@ export default definePlugin(() => {
           setUser(user);
         });
 
-      getLibrary().then((library) => setLibrary(library));
+      getLibrary().then((library) => {
+        setLibrary(library);
+        const withIds = library.filter(
+          (game) => game.steamShortcutAppId != null
+        ).length;
+        logEvent(`library shortcut ids: ${withIds}/${library.length} games`);
+      });
 
       WSClient.connect();
     })

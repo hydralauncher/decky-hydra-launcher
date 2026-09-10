@@ -1,4 +1,4 @@
-use hydra::{get_auth, get_library, download_game_artifact};
+use hydra::{get_auth, get_library, download_game_artifact, resolve_shortcut_app_id};
 
 mod cloud_save;
 mod hydra;
@@ -45,6 +45,19 @@ async fn main() {
                 std::process::exit(1);
             }
             println!("{}", serde_json::json!({ "ok": true }));
+        }
+        "resolve-shortcut" => {
+            let app_id = std::env::args().nth(2).expect("no app id given");
+            match app_id.parse::<u32>() {
+                Ok(id) => {
+                    let result: Option<hydra::ShortcutResolution> = resolve_shortcut_app_id(id);
+                    println!("{}", serde_json::to_string(&result).unwrap());
+                }
+                Err(_) => {
+                    println!("{}", serde_json::json!({ "ok": false, "error": "invalid app id" }));
+                    std::process::exit(1);
+                }
+            }
         }
         "sync-cloud-save" => {
             let auth_json = read_auth_from_stdin();

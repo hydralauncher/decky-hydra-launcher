@@ -5,6 +5,7 @@ import type {
   CloudSaveStatus,
   CloudSaveSyncResult,
   Game,
+  ShortcutResolution,
 } from "./api-types";
 
 export const getAuth = callable<[], Auth>("get_auth");
@@ -28,4 +29,8 @@ export const checkCloudSaveStatus = callable<
   [Auth, string, string | null],
   CloudSaveStatus
 >("check_cloud_save_status");
+export const resolveShortcut = callable<
+  [string],
+  ShortcutResolution | null
+>("resolve_shortcut");
 export const logEvent = callable<[string], void>("log");

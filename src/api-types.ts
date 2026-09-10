@@ -49,6 +49,12 @@ export interface CloudSaveStatus {
   auth?: Auth;
 }
 
+export interface ShortcutResolution {
+  objectId: string;
+  shop: string;
+  source: string;
+}
+
 export interface Auth {
   accessToken: string;
   refreshToken: string;
