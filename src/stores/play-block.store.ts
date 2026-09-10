@@ -1,7 +1,6 @@
 import { create } from "zustand";
 
 interface PlayBlockStore {
-  // New Set per transition so subscribers re-render.
   blockedGames: ReadonlySet<string>;
   engage: (objectId: string) => void;
   disengage: (objectId: string) => void;

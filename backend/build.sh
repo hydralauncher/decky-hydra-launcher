@@ -12,5 +12,4 @@ mkdir -p out
 cp target/release/backend out/backend
 
 echo " --- Cleaning up ---"
-# remove root-owned target folder
 cargo clean

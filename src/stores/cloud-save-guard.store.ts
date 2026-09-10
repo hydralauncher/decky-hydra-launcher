@@ -7,10 +7,6 @@ interface CloudSaveGuardStore {
   clearRemoteNewer: (objectId: string) => void;
 }
 
-// Games whose remote snapshot is newer than the local sync state. Flagged at
-// game launch; post-exit sync is suppressed for them until the user restores
-// or syncs manually. Persisted so a plugin reload mid-session does not lose
-// the protection.
 export const useCloudSaveGuard = create<CloudSaveGuardStore>()(
   persist(
     (set) => ({

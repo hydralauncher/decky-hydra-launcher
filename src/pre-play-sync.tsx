@@ -24,14 +24,10 @@ import {
 } from "./play-block";
 import { composeToastLogo } from "./helpers";
 
-// In-flight sync/restore operations, keyed by objectId. The launch/exit
-// handler awaits these instead of racing them; entries delete on settle.
 const busy = new Map<string, Promise<unknown>>();
 
 const shortcutResolved = new Map<string, string | null>();
 
-// Session caches, invalidated on game exit, guard-flag change, and manual
-// sync/restore.
 const verifiedThisSession = new Set<string>();
 const notifiedThisSession = new Set<string>();
 
@@ -149,7 +145,6 @@ const onGamePageOpen = async (appId: string) => {
     }
 
     if (!status.localDirty) {
-      // Local side is clean (or absent): restoring cannot lose progress.
       toaster.toast({
         title: "Syncing cloud save...",
         body: `${game.title} has a newer save in the cloud; restoring it now.`,
@@ -194,8 +189,6 @@ const onGamePageOpen = async (appId: string) => {
       return;
     }
 
-    // Local progress would be lost by an automatic restore: notify once and
-    // let the user resolve it from the plugin.
     useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
     engagePlayBlock(game.objectId);
     if (!notifiedThisSession.has(game.objectId)) {
@@ -217,8 +210,6 @@ const onGamePageOpen = async (appId: string) => {
 };
 
 const AppPageSync = ({ appid }: { appid?: string }) => {
-  // Some route shapes (children/element) forward no props; parse the hash
-  // route as fallback (Steam uses a hash router: #/library/app/<appid>).
   const hashAppId =
     window.location.hash.match(/\/library\/app\/(\d+)/)?.[1];
   const effectiveAppId = appid ?? hashAppId;
@@ -237,7 +228,6 @@ const AppPageSync = ({ appid }: { appid?: string }) => {
 
 let patchHandle: ((route: any) => any) | null = null;
 
-// Guard resolution (manual sync/restore) releases any block.
 useCloudSaveGuard.subscribe((state, prev) => {
   for (const id of prev.remoteNewerGames) {
     if (!state.remoteNewerGames.includes(id)) {

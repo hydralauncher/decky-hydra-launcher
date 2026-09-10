@@ -24,13 +24,8 @@ const APP_HEADER_FRAGMENT = "AppDetailsHeader";
 export const PLAY_BLOCK_RELEASE_TIMEOUT_MS = 15 * 60 * 1000;
 const BLOCKED_TOAST_THROTTLE_MS = 5_000;
 
-// Per-game release timers; cleared on every disengage path so a late timeout
-// never fires after a clean settle.
 const releaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-// Current app page (set by the pre-play route patch). Listeners are
-// registered once and read store state + this value per event — never
-// captured values, or they go stale.
 let activeAppPageId: string | null = null;
 export const setActiveAppPage = (appId: string | null) => {
   activeAppPageId = appId;
@@ -42,8 +37,6 @@ let selectorMissLogged = new Set<string>();
 const isVisible = (el: HTMLElement) =>
   el.offsetWidth > 0 && el.offsetHeight > 0;
 
-// Composite Play-button predicate: survives Steam client rebuilds because it
-// keys on the stable CSS-module prefix, not the hashed suffix.
 export const findPlayButton = (): HTMLElement | null => {
   const candidates = Array.from(
     document.querySelectorAll<HTMLElement>(`[class*="${PLAY_CLASS_FRAGMENT}"]`)
@@ -74,8 +67,6 @@ const isBlockedPlayTarget = (event: Event): boolean => {
   return play ? play.contains(target) : false;
 };
 
-// The app page id is a shortcut appid; the block store keys by objectId.
-// Resolution goes through the same mapping the pre-play check uses.
 const activeGameForPage = (): string | null =>
   activeAppPageId ? (findGameByShortcutId(activeAppPageId)?.objectId ?? null) : null;
 
@@ -83,8 +74,6 @@ const blockEvent = (event: Event) => {
   if (!isBlockedPlayTarget(event)) return;
 
   event.preventDefault();
-  // Capture-phase stopPropagation does not stop other listeners on the same
-  // node; stopImmediatePropagation does.
   event.stopImmediatePropagation();
 
   const objectId = activeGameForPage();
@@ -113,14 +102,11 @@ const blockEvent = (event: Event) => {
 };
 
 export const engagePlayBlock = (objectId: string) => {
-  // Re-engage must not leak the previous timer.
   const existing = releaseTimers.get(objectId);
   if (existing) clearTimeout(existing);
 
   usePlayBlockStore.getState().engage(objectId);
 
-  // Probe once per engage with per-stage counts so drift triage shows which
-  // predicate layer broke (no candidates vs filtered out vs header missing).
   if (!selectorMissLogged.has(objectId)) {
     const candidates = document.querySelectorAll(`[class*="${PLAY_CLASS_FRAGMENT}"]`).length;
     const controls = Array.from(
@@ -146,8 +132,6 @@ export const engagePlayBlock = (objectId: string) => {
   const timer = setTimeout(() => {
     releaseTimers.delete(objectId);
     usePlayBlockStore.getState().disengage(objectId);
-    // Timeout never cancels the restore; the cloud-save guard stays the
-    // authority on what may sync afterwards.
     logEvent(`play block: release timeout for ${objectId}`);
     toaster.toast({
       title: "Save sync is taking long",

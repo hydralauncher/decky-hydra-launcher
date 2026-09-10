@@ -143,8 +143,6 @@ export function Home() {
       <PanelSection title="Playable on the Deck">
         <div className="library-games">
           {library
-            // Steam only: every backend command hard-codes shop=steam, and v2
-            // auto-sync is steam-gated on the launcher too.
             .filter((game) => !game.isDeleted && game.shop === "steam")
             .map((game) => (
               <PanelSectionRow>

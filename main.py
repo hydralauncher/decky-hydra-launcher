@@ -9,22 +9,15 @@ import decky
 PLUGIN_DIR = decky.DECKY_PLUGIN_DIR
 BACKEND_PATH = f"{PLUGIN_DIR}/bin/backend"
 
-# Sync/restore can involve large transfers; status checks must stay quick so
-# the exit handler never waits long on them.
 BACKEND_TIMEOUT = 4 * 60 * 60
 STATUS_TIMEOUT = 30
 
-# Only log arguments that cannot carry credentials: plain ids and local paths.
-# URLs (presigned download links) and anything with query strings stay out.
 _SAFE_ARG = re.compile(r"^[A-Za-z0-9_./~ -]{1,200}$")
-
 
 def _loggable_args(args: list[str]) -> str:
     return " ".join(a if _SAFE_ARG.match(a) else "<redacted>" for a in args)
 
-
 async def _run_backend(args: list[str], stdin_data: str | None = None, timeout: int = BACKEND_TIMEOUT) -> str:
-    # Never log stdin_data (auth tokens) or URLs (presigned credentials).
     decky.logger.info("backend call: %s", _loggable_args(args))
 
     process = await asyncio.create_subprocess_exec(
@@ -62,7 +55,6 @@ async def _run_backend(args: list[str], stdin_data: str | None = None, timeout: 
     decky.logger.info("backend ok: %s", args[0])
     return out
 
-
 class Plugin:
     async def get_auth(self):
         return json.loads(await _run_backend(["get-auth"]))
@@ -78,7 +70,6 @@ class Plugin:
         return json.loads(result)
 
     async def sync_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None, force: bool, resolutions: dict | None = None):
-        # Auth goes through stdin so tokens never appear in the process list.
         args = ["sync-cloud-save", object_id, wine_prefix or ""]
         if force:
             args.append("force")

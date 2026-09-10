@@ -82,9 +82,6 @@ function Plugin() {
 let updateInterval: NodeJS.Timeout;
 let lastTick: Date;
 
-// Pre-launch status checks in flight, per objectId. The exit handler awaits
-// the pending check before syncing so a quick launch-then-exit cannot slip
-// past the guard.
 const pendingStatusChecks = new Map<string, Promise<void>>();
 
 const onAppLifetimeNotification = async (
@@ -132,21 +129,13 @@ const onAppLifetimeNotification = async (
       setRemoteId(game.remoteId);
       setStartedAt(startedAt);
 
-      // Bypassed launch (recents/home): the page block is irrelevant now;
-      // the post-exit guard covers the session.
       disengagePlayBlock(game.objectId);
 
-      // Pre-launch guard: the plugin cannot block a Steam launch, so when the
-      // remote snapshot is newer — or its state is unknown — we suppress this
-      // session's post-exit sync and point the user at a manual restore.
-      // Already-flagged games skip the check: the flag only clears through
-      // manual action, so re-checking would just spend API calls.
       const alreadyFlagged = useCloudSaveGuard
         .getState()
         .remoteNewerGames.includes(game.objectId);
 
       if (game.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
-        // Never race an in-flight pre-play restore for the same game.
         await waitForBusy(game.objectId);
 
         const check = checkCloudSaveStatus(auth, game.objectId, game.winePrefixPath)
@@ -157,8 +146,6 @@ const onAppLifetimeNotification = async (
             if (status.remoteNewer) {
               useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
               logEvent(`guard flagged: ${game.objectId} (remote v${status.remoteVersion}, local v${status.localVersion ?? "none"})`);
-              // Skip the toast when the session already ended; the exit
-              // handler shows the authoritative "sync skipped" message.
               if (useCurrentGame.getState().objectId === game.objectId) {
                 toaster.toast({
                   title: "Newer cloud save available",
@@ -173,7 +160,6 @@ const onAppLifetimeNotification = async (
           })
           .catch((err) => {
             console.error("Failed to check cloud save status", err);
-            // Fail closed: an unknown remote state suppresses auto-sync too.
             useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
             toaster.toast({
               title: "Cloud save status unknown",
@@ -229,12 +215,9 @@ const onAppLifetimeNotification = async (
 
     const isHydraRunning = await isHydraLauncherRunning();
 
-    // Never decide before the launch-time status check or an in-flight
-    // restore settles.
     await pendingStatusChecks.get(game.objectId)?.catch(() => {});
     await waitForBusy(game.objectId);
 
-    // A play session dirties local saves: next page open must re-verify.
     invalidatePrePlayCache(game.objectId);
 
     const remoteNewer = useCloudSaveGuard
@@ -250,7 +233,6 @@ const onAppLifetimeNotification = async (
       return;
     }
 
-    // Auth and subscription may have changed during the session; re-read them.
     const freshAuth = useAuthStore.getState().auth;
     const freshSubscription = useUserStore.getState().hasActiveSubscription;
 
@@ -275,7 +257,6 @@ const onAppLifetimeNotification = async (
         }
 
         if (!result.ok && result.conflict) {
-          // Both sides changed the same files: flag and let the user pick.
           useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
           toaster.toast({
             title: "Cloud save conflict",
@@ -296,15 +277,11 @@ const onAppLifetimeNotification = async (
         console.error("Failed to sync cloud save", error);
         logEvent(`auto-sync failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
 
-        // Failed sync with nothing actively protecting the game: release.
-        // Guard-flagged games keep the block until the user resolves.
         if (!useCloudSaveGuard.getState().remoteNewerGames.includes(game.objectId)) {
           disengagePlayBlock(game.objectId);
         }
 
         if (error instanceof Error && error.message.includes("remote-newer")) {
-          // Another device synced since the launch check: suppress auto-sync
-          // and let the user decide.
           useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
           toaster.toast({
             title: "Cloud sync skipped",

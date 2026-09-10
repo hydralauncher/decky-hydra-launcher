@@ -98,8 +98,6 @@ export class WSClient {
     );
 
     setTimeout(() => {
-      // connect() handles its own failures via handleDisconnect, which
-      // schedules the next attempt; the flag must be clear before that.
       this.reconnecting = false;
       this.connect();
     }, delay);

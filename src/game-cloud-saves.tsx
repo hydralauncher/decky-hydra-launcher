@@ -195,8 +195,6 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
 
       if (result.auth) setAuth(result.auth);
 
-      // A partial restore leaves local state behind the remote snapshot;
-      // keep the guard so auto-sync cannot drop the skipped cloud files.
       if (result.skippedFiles.length === 0) {
         useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
         invalidatePrePlayCache(game.objectId);
