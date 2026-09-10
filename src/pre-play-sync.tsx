@@ -210,13 +210,16 @@ const onGamePageOpen = async (appId: string) => {
 };
 
 const AppPageSync = ({ appid }: { appid?: string }) => {
-  const hashAppId =
+  const routeAppId =
+    window.location.pathname.match(/\/library\/app\/(\d+)/)?.[1] ??
     window.location.hash.match(/\/library\/app\/(\d+)/)?.[1];
-  const effectiveAppId = appid ?? hashAppId;
+  const effectiveAppId = appid ?? routeAppId;
 
   useEffect(() => {
     setActiveAppPage(effectiveAppId ? String(effectiveAppId) : null);
-    logEvent(`pre-play page mount: appid=${effectiveAppId ?? "none"}`);
+    logEvent(
+      `pre-play page mount: appid=${effectiveAppId ?? "none"} path=${window.location.pathname} hash=${window.location.hash}`
+    );
     return () => setActiveAppPage(null);
   }, [effectiveAppId]);
 
