@@ -86,6 +86,8 @@ const MAX_SNAPSHOT_FILES: usize = 500;
 
 const MAX_SNAPSHOT_BYTES: u64 = 2_147_483_647;
 
+const MAX_STORE_USER_FOLDER_LEN: usize = 255;
+
 const MAX_CONCURRENT_TRANSFERS: usize = 8;
 
 const HTTP_CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -923,6 +925,26 @@ fn is_safe_manifest_file(file: &RestoreManifestFile) -> bool {
         && is_safe_raw_path(&file.raw_path)
 
         && is_safe_relative_path(&file.relative_path)
+
+}
+
+fn mtime_matches_known(actual: std::time::SystemTime, expected_rfc3339: &str) -> bool {
+
+    let actual = chrono::DateTime::<chrono::Utc>::from(actual);
+
+    let expected = chrono::DateTime::parse_from_rfc3339(expected_rfc3339)
+
+        .ok()
+
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    match expected {
+
+        Some(expected) => actual.timestamp_millis() == expected.timestamp_millis(),
+
+        None => false,
+
+    }
 
 }
 
@@ -2304,19 +2326,11 @@ async fn prepare_upload_commit(
 
         }
 
-        let modified_known = metadata
-            .modified()
-            .ok()
-            .map(|t| chrono::DateTime::<chrono::Utc>::from(t));
+        let modified_known = metadata.modified().ok();
 
-        let modified_expected =
-            chrono::DateTime::parse_from_rfc3339(&expected_modified)
-                .ok()
-                .map(|dt| dt.with_timezone(&chrono::Utc));
+        if let Some(actual) = modified_known {
 
-        if let (Some(actual), Some(expected)) = (modified_known, modified_expected) {
-
-            if actual != expected {
+            if !mtime_matches_known(actual, &expected_modified) {
 
                 return Err(anyhow!(
 
@@ -2720,7 +2734,7 @@ impl RestoreContext {
 
             let safe = !concrete.is_empty()
 
-                && concrete.len() <= 255
+                && concrete.len() <= MAX_STORE_USER_FOLDER_LEN
 
                 && !concrete.contains(['/', '\\', '\0'])
 
@@ -3113,6 +3127,14 @@ pub async fn restore_cloud_save(
 
     }
 
+    let declared_bytes: u64 = blob_urls.values().map(|(_, size)| *size).sum();
+
+    if declared_bytes > MAX_SNAPSHOT_BYTES {
+
+        return Err(anyhow!("Cloud snapshot exceeds 2 GiB limit"));
+
+    }
+
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
 
     let mut join_set = tokio::task::JoinSet::new();
@@ -3125,7 +3147,7 @@ pub async fn restore_cloud_save(
 
         .build()?;
 
-    for (hash, (url, _size)) in &blob_urls {
+    for (hash, (url, size)) in &blob_urls {
 
         let permit = semaphore.clone().acquire_owned().await?;
 
@@ -3136,6 +3158,8 @@ pub async fn restore_cloud_save(
         let url = url.clone();
 
         let hash = hash.clone();
+
+        let declared_size = *size;
 
         join_set.spawn(async move {
 
@@ -3149,11 +3173,25 @@ pub async fn restore_cloud_save(
 
             let mut hasher = Sha256::new();
 
+            let mut written: u64 = 0;
+
             loop {
 
                 match response.chunk().await? {
 
                     Some(bytes) => {
+
+                        written = written.saturating_add(bytes.len() as u64);
+
+                        if written > declared_size {
+
+                            drop(writer);
+
+                            let _ = tokio_fs::remove_file(&dest).await;
+
+                            return Err(anyhow!("Downloaded blob exceeds declared size"));
+
+                        }
 
                         hasher.update(&bytes);
 
@@ -4246,6 +4284,27 @@ mod tests {
             size_bytes,
 
         }
+
+    }
+
+    #[test]
+
+    fn mtime_matches_known_tolerates_submillis_precision() {
+
+        let actual = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::new(1_700_000_000, 123_456_789);
+
+        let expected = chrono::DateTime::<chrono::Utc>::from(actual)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+        assert!(mtime_matches_known(actual, &expected));
+
+        let different = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::new(1_700_000_005, 0);
+
+        assert!(!mtime_matches_known(different, &expected));
+
+        assert!(!mtime_matches_known(actual, "not-a-timestamp"));
 
     }
 
