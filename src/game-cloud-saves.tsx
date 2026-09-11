@@ -78,114 +78,6 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     getLegacyArtifacts();
   }, [getSnapshot, getLegacyArtifacts]);
 
-  const runSync = useCallback(
-    async (
-      force: boolean,
-      resolutions?: Record<string, "local" | "remote">
-    ) => {
-      if (!auth || !hasActiveSubscription) return;
-
-      setIsSyncing(true);
-      engagePlayBlock(game.objectId);
-
-      try {
-        const result = await trackBusy(
-          game.objectId,
-          "sync",
-          () =>
-            syncCloudSave(
-              auth,
-              game.objectId,
-              game.shop,
-              game.winePrefixPath,
-              force,
-              resolutions ?? null
-            )
-        );
-
-        if (result.auth) setAuth(result.auth);
-
-        if (!result.ok && result.conflict) {
-          setIsSyncing(false);
-          const names = result.conflict.map((identity) => {
-            const parts = identity.split("\u0000");
-            return parts.slice(1).join("/");
-          });
-          const resolveAll = (side: "local" | "remote") => {
-            const map = Object.fromEntries(
-              result.conflict!.map((identity) => [identity, side])
-            );
-            runSync(true, map);
-          };
-          showModal(
-            <ConfirmModal
-              strTitle="Cloud Save Conflict"
-              strDescription={`Both this device and the cloud changed ${names.length} file(s): ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}. Everything else merges automatically; choose the side for these.`}
-              strOKButtonText="Keep Local"
-              strCancelButtonText="Keep Cloud"
-              onOK={() => resolveAll("local")}
-              onCancel={() => resolveAll("remote")}
-            />
-          );
-          return;
-        }
-
-        useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
-        invalidatePrePlayCache(game.objectId);
-        disengagePlayBlock(game.objectId);
-
-        toaster.toast({
-          title: "Cloud save synced",
-          body: `Uploaded ${result.uploadedFiles} files (${result.skippedFiles} already in the cloud)`,
-          logo: composeToastLogo(game.iconUrl),
-        });
-
-        getSnapshot();
-      } catch (error: unknown) {
-        if (error instanceof Error && error.message.includes("remote-newer")) {
-          setIsSyncing(false);
-          confirmForceSync();
-          return;
-        }
-
-        console.error(error);
-        disengagePlayBlock(game.objectId);
-
-        toaster.toast({
-          title: "Failed to sync cloud save",
-          body: error instanceof Error ? error.message : "Unknown error",
-        });
-      } finally {
-        setIsSyncing(false);
-      }
-    },
-    [
-      auth,
-      hasActiveSubscription,
-      game.objectId,
-      game.shop,
-      game.winePrefixPath,
-      game.iconUrl,
-      setAuth,
-      getSnapshot,
-    ]
-  );
-
-  const confirmForceSync = useCallback(() => {
-    showModal(
-      <ConfirmModal
-        strTitle="Overwrite Newer Cloud Save?"
-        strDescription="A newer cloud save exists for this game. Syncing now will overwrite it with your local save."
-        strOKButtonText="Sync Anyway"
-        strCancelButtonText="Cancel"
-        onOK={() => runSync(true)}
-        onCancel={() => disengagePlayBlock(game.objectId)}
-      />
-    );
-  }, [runSync, game.objectId]);
-
-  const syncNow = useCallback(() => runSync(false), [runSync]);
-
   const restore = useCallback(async () => {
     if (!auth || !hasActiveSubscription) return;
 
@@ -240,6 +132,117 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     game.iconUrl,
     setAuth,
   ]);
+
+  const runSync = useCallback(
+    async (
+      force: boolean,
+      resolutions?: Record<string, "local" | "remote">
+    ) => {
+      if (!auth || !hasActiveSubscription) return;
+
+      setIsSyncing(true);
+      engagePlayBlock(game.objectId);
+
+      try {
+        const result = await trackBusy(
+          game.objectId,
+          "sync",
+          () =>
+            syncCloudSave(
+              auth,
+              game.objectId,
+              game.shop,
+              game.winePrefixPath,
+              force,
+              resolutions ?? null
+            )
+        );
+
+        if (result.auth) setAuth(result.auth);
+
+        if (!result.ok && result.conflict) {
+          setIsSyncing(false);
+          const names = result.conflict.map((identity) => {
+            const parts = identity.split("\u0000");
+            return parts.slice(1).join("/");
+          });
+          const resolveAll = (side: "local" | "remote") => {
+            if (side === "remote") {
+              restore();
+              return;
+            }
+            runSync(true);
+          };
+          showModal(
+            <ConfirmModal
+              strTitle="Cloud Save Conflict"
+              strDescription={`Both this device and the cloud changed ${names.length} file(s): ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}. Everything else merges automatically; choose the side for these.`}
+              strOKButtonText="Keep Local"
+              strCancelButtonText="Keep Cloud"
+              onOK={() => resolveAll("local")}
+              onCancel={() => resolveAll("remote")}
+            />
+          );
+          return;
+        }
+
+        useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
+        invalidatePrePlayCache(game.objectId);
+        disengagePlayBlock(game.objectId);
+
+        toaster.toast({
+          title: "Cloud save synced",
+          body: `Uploaded ${result.uploadedFiles} files (${result.skippedFiles} already in the cloud)`,
+          logo: composeToastLogo(game.iconUrl),
+        });
+
+        getSnapshot();
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message.includes("remote-newer")) {
+          setIsSyncing(false);
+          confirmForceSync();
+          return;
+        }
+
+        console.error(error);
+        disengagePlayBlock(game.objectId);
+
+        toaster.toast({
+          title: "Failed to sync cloud save",
+          body: error instanceof Error ? error.message : "Unknown error",
+        });
+      } finally {
+        setIsSyncing(false);
+      }
+    },
+    [
+      auth,
+      hasActiveSubscription,
+      game.objectId,
+      game.shop,
+      game.winePrefixPath,
+      game.iconUrl,
+      setAuth,
+      getSnapshot,
+      restore,
+    ]
+  );
+
+  const confirmForceSync = useCallback(() => {
+    showModal(
+      <ConfirmModal
+        strTitle="Overwrite Newer Cloud Save?"
+        strDescription="A newer cloud save exists for this game. Syncing now will overwrite it with your local save."
+        strOKButtonText="Sync Anyway"
+        strCancelButtonText="Cancel"
+        onOK={() => runSync(true)}
+        onCancel={() => disengagePlayBlock(game.objectId)}
+      />
+    );
+  }, [runSync, game.objectId]);
+
+  const syncNow = useCallback(() => runSync(false), [runSync]);
+
 
   const confirmRestore = useCallback(() => {
     showModal(

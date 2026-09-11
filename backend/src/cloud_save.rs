@@ -88,6 +88,14 @@ const MAX_SNAPSHOT_BYTES: u64 = 2_147_483_647;
 
 const MAX_CONCURRENT_TRANSFERS: usize = 8;
 
+const HTTP_CONNECT_TIMEOUT_SECS: u64 = 30;
+
+const HTTP_TOTAL_TIMEOUT_SECS: u64 = 1800;
+
+const TOKEN_REFRESH_GRACE_MS: f64 = 60_000.0;
+
+const ERROR_BODY_PREVIEW_CHARS: usize = 512;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 #[serde(rename_all = "camelCase")]
@@ -126,7 +134,7 @@ pub async fn ensure_fresh_token(client: &reqwest::Client, auth: &Auth) -> Result
 
     let expired = match auth.token_expiration_timestamp {
 
-        Some(ts) => ts < now_ms + 60_000.0,
+        Some(ts) => ts < now_ms + TOKEN_REFRESH_GRACE_MS,
 
         None => false,
 
@@ -942,9 +950,9 @@ fn hydra_client(auth: &Auth) -> Result<reqwest::Client> {
 
         .default_headers(headers)
 
-        .connect_timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
 
-        .timeout(std::time::Duration::from_secs(1800))
+        .timeout(std::time::Duration::from_secs(HTTP_TOTAL_TIMEOUT_SECS))
 
         .build()?)
 
@@ -960,7 +968,7 @@ async fn send_checked(builder: reqwest::RequestBuilder) -> Result<reqwest::Respo
 
         let body = response.text().await.unwrap_or_default();
 
-        let body: String = body.chars().take(512).collect();
+        let body: String = body.chars().take(ERROR_BODY_PREVIEW_CHARS).collect();
 
         return Err(anyhow!("Request failed with status {status}: {body}"));
 
@@ -2236,7 +2244,7 @@ async fn prepare_upload_commit(
 
                     proposal.size_bytes as usize,
 
-                    proposal.hash.clone(),
+                    source.entry.last_modified_at.clone(),
 
                 )
 
@@ -2270,35 +2278,45 @@ async fn prepare_upload_commit(
 
     );
 
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSFERS));
+    let upload_client = reqwest::Client::builder()
 
-    let mut join_set = tokio::task::JoinSet::new();
+        .connect_timeout(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
 
-    for (url, checksum, path, size, expected_hash) in jobs {
+        .timeout(std::time::Duration::from_secs(HTTP_TOTAL_TIMEOUT_SECS))
 
-        let permit = semaphore.clone().acquire_owned().await?;
+        .build()?;
 
-        let upload_client = reqwest::Client::builder()
+    for (url, checksum, path, size, expected_modified) in jobs {
 
-            .connect_timeout(std::time::Duration::from_secs(30))
+        let metadata = tokio_fs::metadata(&path).await.map_err(|_| {
 
-            .timeout(std::time::Duration::from_secs(1800))
+            anyhow!("Save file changed during sync; aborting before commit")
 
-            .build()?;
+        })?;
 
-        join_set.spawn(async move {
+        if metadata.len() != size as u64 {
 
-            let _permit = permit;
+            return Err(anyhow!(
 
-            let body = tokio_fs::read(&path).await.map_err(|_| {
+                "Save file changed during sync; aborting before commit"
 
-                anyhow!("Save file changed during sync; aborting before commit")
+            ));
 
-            })?;
+        }
 
-            let actual_hash = format!("{:x}", Sha256::digest(&body));
+        let modified_known = metadata
+            .modified()
+            .ok()
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t));
 
-            if actual_hash != expected_hash {
+        let modified_expected =
+            chrono::DateTime::parse_from_rfc3339(&expected_modified)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc));
+
+        if let (Some(actual), Some(expected)) = (modified_known, modified_expected) {
+
+            if actual != expected {
 
                 return Err(anyhow!(
 
@@ -2308,37 +2326,35 @@ async fn prepare_upload_commit(
 
             }
 
-            let resp = upload_client
+        }
 
-                .put(&url)
+        let body = tokio_fs::read(&path).await.map_err(|_| {
 
-                .header("Content-Length", size.to_string())
+            anyhow!("Save file changed during sync; aborting before commit")
 
-                .header("x-amz-checksum-sha256", checksum)
+        })?;
 
-                .body(body)
+        let resp = upload_client
 
-                .send()
+            .put(&url)
 
-                .await?;
+            .header("Content-Length", size.to_string())
 
-            let status = resp.status();
+            .header("x-amz-checksum-sha256", checksum)
 
-            if !status.is_success() {
+            .body(body)
 
-                return Err(anyhow!("Blob upload failed with status {status}"));
+            .send()
 
-            }
+            .await?;
 
-            Ok::<(), anyhow::Error>(())
+        let status = resp.status();
 
-        });
+        if !status.is_success() {
 
-    }
+            return Err(anyhow!("Blob upload failed with status {status}"));
 
-    while let Some(result) = join_set.join_next().await {
-
-        result.context("Upload task panicked")??;
+        }
 
     }
 
@@ -2386,7 +2402,7 @@ async fn prepare_upload_commit(
 
                     let body = resp.text().await.unwrap_or_default();
 
-                    let body: String = body.chars().take(512).collect();
+                    let body: String = body.chars().take(ERROR_BODY_PREVIEW_CHARS).collect();
 
                     return Err(anyhow!("Commit failed with status {status}: {body}"));
 
@@ -3050,7 +3066,18 @@ pub async fn restore_cloud_save(
 
     );
 
-    let temp = tempfile::tempdir().context("Failed to create temp dir")?;
+    let temp = match state_dir() {
+
+        Ok(dir) if std::fs::create_dir_all(&dir).is_ok() => {
+
+            tempfile::tempdir_in(dir)
+
+        }
+
+        _ => tempfile::tempdir(),
+
+    }
+    .context("Failed to create temp dir")?;
 
     let manifest_hashes: std::collections::HashSet<&str> =
 
@@ -3092,9 +3119,9 @@ pub async fn restore_cloud_save(
 
     let download_client = reqwest::Client::builder()
 
-        .connect_timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
 
-        .timeout(std::time::Duration::from_secs(1800))
+        .timeout(std::time::Duration::from_secs(HTTP_TOTAL_TIMEOUT_SECS))
 
         .build()?;
 
@@ -3114,17 +3141,43 @@ pub async fn restore_cloud_save(
 
             let _permit = permit;
 
-            let bytes = client.get(&url).send().await?.error_for_status()?.bytes().await?;
+            let mut response = client.get(&url).send().await?.error_for_status()?;
 
-            let actual = format!("{:x}", Sha256::digest(&bytes));
+            let dest_file = tokio_fs::File::create(&dest).await?;
+
+            let mut writer = tokio::io::BufWriter::new(dest_file);
+
+            let mut hasher = Sha256::new();
+
+            loop {
+
+                match response.chunk().await? {
+
+                    Some(bytes) => {
+
+                        hasher.update(&bytes);
+
+                        tokio::io::AsyncWriteExt::write_all(&mut writer, &bytes).await?;
+
+                    }
+
+                    None => break,
+
+                }
+
+            }
+
+            tokio::io::AsyncWriteExt::shutdown(&mut writer).await?;
+
+            let actual = format!("{:x}", hasher.finalize());
 
             if actual != hash {
+
+                let _ = tokio_fs::remove_file(&dest).await;
 
                 return Err(anyhow!("Downloaded blob failed hash verification"));
 
             }
-
-            tokio_fs::write(&dest, &bytes).await?;
 
             Ok::<(), anyhow::Error>(())
 
