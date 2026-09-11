@@ -10,15 +10,9 @@ pub struct MergeOutcome {
 
 }
 
-#[allow(dead_code)]
-
 pub struct ConflictEntry {
 
     pub identity: String,
-
-    pub local_hash: Option<String>,
-
-    pub remote_hash: Option<String>,
 
 }
 
@@ -80,17 +74,35 @@ pub fn merge_snapshots(
 
     ) -> Result<HashMap<String, &'a SnapshotFileEntry>, String> {
 
-        let mut map = HashMap::new();
+        let mut map: HashMap<String, &'a SnapshotFileEntry> = HashMap::new();
+
+        let mut duplicate_logged = false;
 
         for f in files {
 
             let k = key(&to_state_entry(f));
 
-            if map.insert(k.clone(), f).is_some() {
+            if let Some(existing) = map.get(&k) {
 
-                return Err(format!("duplicate file identity: {k}"));
+                if !duplicate_logged {
+
+                    duplicate_logged = true;
+
+                    eprintln!("merge: duplicate file identities present, resolving deterministically");
+
+                }
+
+                if (f.hash.clone(), f.size_bytes)
+                    >= (existing.hash.clone(), existing.size_bytes)
+                {
+
+                    continue;
+
+                }
 
             }
+
+            map.insert(k, f);
 
         }
 
@@ -168,15 +180,7 @@ pub fn merge_snapshots(
 
                     Some(b) if same_content(&re, b) => files.push(l.clone()),
 
-                    _ => conflicts.push(ConflictEntry {
-
-                        identity,
-
-                        local_hash: Some(le.hash),
-
-                        remote_hash: Some(re.hash),
-
-                    }),
+                    _ => conflicts.push(ConflictEntry { identity }),
 
                 }
 
@@ -191,15 +195,7 @@ pub fn merge_snapshots(
                     continue;
                 }
 
-                conflicts.push(ConflictEntry {
-
-                    identity,
-
-                    local_hash: None,
-
-                    remote_hash: Some(re.hash),
-
-                });
+                conflicts.push(ConflictEntry { identity });
 
             }
 
@@ -215,15 +211,7 @@ pub fn merge_snapshots(
 
                 }
 
-                conflicts.push(ConflictEntry {
-
-                    identity,
-
-                    local_hash: Some(le.hash),
-
-                    remote_hash: None,
-
-                });
+                conflicts.push(ConflictEntry { identity });
 
             }
 
@@ -348,6 +336,51 @@ mod tests {
         let merged = merge_snapshots(&local, &remote, None, &Default::default()).unwrap();
 
         assert_eq!(merged.conflicts.len(), 1);
+
+    }
+
+    #[test]
+
+    fn duplicate_identity_resolves_instead_of_failing() {
+
+        let local = vec![
+            file("<home>/g", "a.sav", "h1"),
+            file("<home>/g", "a.sav", "h2"),
+        ];
+
+        let remote = vec![file("<home>/g", "a.sav", "h3")];
+
+        let merged = merge_snapshots(&local, &remote, None, &Default::default()).unwrap();
+
+        assert_eq!(merged.conflicts.len(), 1);
+
+    }
+
+    #[test]
+
+    fn duplicate_identity_resolution_is_order_independent() {
+
+        let remote = vec![file("<home>/g", "a.sav", "h1")];
+
+        for local in [
+            vec![
+                file("<home>/g", "a.sav", "h1"),
+                file("<home>/g", "a.sav", "h2"),
+            ],
+            vec![
+                file("<home>/g", "a.sav", "h2"),
+                file("<home>/g", "a.sav", "h1"),
+            ],
+        ] {
+            let merged =
+                merge_snapshots(&local, &remote, None, &Default::default()).unwrap();
+
+            assert!(merged.conflicts.is_empty());
+
+            assert_eq!(merged.files.len(), 1);
+
+            assert_eq!(merged.files[0].hash, "h1");
+        }
 
     }
 

@@ -5,10 +5,18 @@ import type { CSSProperties } from "react";
 
 const activeToasts = new Map<string, ToastNotification>();
 
+export const SYNC_TOAST_TIMEOUT_MS = 30_000;
+
 export const showSyncToast = (objectId: string, data: ToastData) => {
   dismissSyncToast(objectId);
   try {
-    activeToasts.set(objectId, toaster.toast(data));
+    const notification = toaster.toast(data);
+    if (
+      notification &&
+      typeof (notification as ToastNotification).dismiss === "function"
+    ) {
+      activeToasts.set(objectId, notification as ToastNotification);
+    }
   } catch {
     return;
   }

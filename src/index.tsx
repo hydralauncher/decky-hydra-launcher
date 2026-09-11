@@ -29,11 +29,13 @@ import {
 import {
   invalidatePrePlayCache,
   registerPrePlaySync,
+  trackBusy,
   unregisterPrePlaySync,
   waitForBusy,
 } from "./pre-play-sync";
 import {
   disengagePlayBlock,
+  engagePlayBlock,
   registerPlayBlock,
   unregisterPlayBlock,
 } from "./play-block";
@@ -139,7 +141,7 @@ const onAppLifetimeNotification = async (
       if (game.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
         await waitForBusy(game.objectId);
 
-        const check = checkCloudSaveStatus(auth, game.objectId, game.winePrefixPath)
+        const check = checkCloudSaveStatus(auth, game.objectId, game.shop, game.winePrefixPath)
           .then((status) => {
             if (status.auth) {
               useAuthStore.getState().setAuth(status.auth);
@@ -245,12 +247,16 @@ const onAppLifetimeNotification = async (
     ) {
       try {
         logEvent(`auto-sync start: ${game.objectId}`);
-        const result = await syncCloudSave(
-          freshAuth,
-          game.objectId,
-          game.winePrefixPath,
-          false,
-          null
+        engagePlayBlock(game.objectId);
+        const result = await trackBusy(game.objectId, "sync", () =>
+          syncCloudSave(
+            freshAuth,
+            game.objectId,
+            game.shop,
+            game.winePrefixPath,
+            false,
+            null
+          )
         );
 
         if (result.auth) {
@@ -259,6 +265,7 @@ const onAppLifetimeNotification = async (
 
         if (!result.ok && result.conflict) {
           useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+          disengagePlayBlock(game.objectId);
           toaster.toast({
             title: "Cloud save conflict",
             body: `${game.title}: ${result.conflict.length} file(s) changed on both this device and the cloud. Open the Hydra plugin to choose which to keep.`,
@@ -285,6 +292,7 @@ const onAppLifetimeNotification = async (
 
         if (error instanceof Error && error.message.includes("remote-newer")) {
           useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+          disengagePlayBlock(game.objectId);
           toaster.toast({
             title: "Cloud sync skipped",
             body: `${game.title} has a newer save in the cloud. Restore it from the Hydra plugin, or sync manually to overwrite the cloud version.`,

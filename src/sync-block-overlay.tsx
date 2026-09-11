@@ -17,9 +17,9 @@ import {
   type ReactNode,
 } from "react";
 
-import { findGameByShortcutId, invalidatePrePlayCache, trackBusy } from "./pre-play-sync";
+import { findGameByShortcutId, invalidatePrePlayCache, markPrePlayVerified, trackBusy } from "./pre-play-sync";
 import { logEvent, restoreCloudSave, syncCloudSave } from "./events";
-import { attachBlockListeners, detachBlockListeners, disengagePlayBlock, setQamOpen } from "./play-block";
+import { attachBlockListeners, detachBlockListeners, disengagePlayBlock, engagePlayBlock, setQamOpen } from "./play-block";
 import {
   useAuthStore,
   useCloudSaveGuard,
@@ -386,6 +386,7 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
   const finishResolve = (title: string, body: string) => {
     useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
     invalidatePrePlayCache(game.objectId);
+    markPrePlayVerified(game.objectId);
     toaster.toast({ title, body, logo: composeToastLogo(game.iconUrl) });
     disengagePlayBlock(game.objectId);
   };
@@ -410,12 +411,14 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
     const { hasActiveSubscription } = useUserStore.getState();
     if (!auth || !hasActiveSubscription || resolving) return;
     logEvent(`conflict resolve start: ${game.objectId} side=${side}`);
+    engagePlayBlock(game.objectId);
     setResolving(side);
     try {
       if (side === "local") {
         const result = await trackBusy(
           game.objectId,
-          syncCloudSave(auth, game.objectId, game.winePrefixPath, true, null)
+          "sync",
+          () => syncCloudSave(auth, game.objectId, game.shop, game.winePrefixPath, true, null)
         );
         if (result.auth) useAuthStore.getState().setAuth(result.auth);
         if (!result.ok && result.conflict) {
@@ -434,7 +437,8 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
       } else {
         const result = await trackBusy(
           game.objectId,
-          restoreCloudSave(auth, game.objectId, game.winePrefixPath)
+          "restore",
+          () => restoreCloudSave(auth, game.objectId, game.shop, game.winePrefixPath)
         );
         if (result.auth) useAuthStore.getState().setAuth(result.auth);
         if (result.skippedFiles.length === 0) {
@@ -456,6 +460,7 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
         title: "Failed to resolve conflict",
         body: error instanceof Error ? error.message : "Unknown error",
       });
+      disengagePlayBlock(game.objectId);
     } finally {
       setResolving(null);
     }

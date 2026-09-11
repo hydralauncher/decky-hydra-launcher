@@ -5,6 +5,7 @@ import type { Game } from "./api-types";
 import {
   checkCloudSaveStatus,
   getLibrary,
+  isHydraLauncherRunning,
   logEvent,
   resolveShortcut,
   restoreCloudSave,
@@ -25,16 +26,23 @@ import {
 } from "./play-block";
 import { composeToastLogo } from "./helpers";
 import { PiCloudArrowDown } from "react-icons/pi";
-import { showSyncToast, SyncToastBody } from "./sync-toast";
+import { showSyncToast, SYNC_TOAST_TIMEOUT_MS, SyncToastBody } from "./sync-toast";
 import { SyncBlockOverlay } from "./sync-block-overlay";
-import { PLAY_BLOCK_RELEASE_TIMEOUT_MS } from "./play-block";
 
-const busy = new Map<string, Promise<unknown>>();
+const busy = new Map<string, ActiveOperation>();
 
 const shortcutResolved = new Map<string, string | null>();
 
-const verifiedThisSession = new Set<string>();
+const verifiedAt = new Map<string, number>();
 const notifiedThisSession = new Set<string>();
+const hydraRunningToastShown = new Set<string>();
+
+const VERIFIED_TTL_MS = 5 * 60 * 1000;
+
+const isRecentlyVerified = (objectId: string): boolean => {
+  const at = verifiedAt.get(objectId);
+  return at !== undefined && Date.now() - at < VERIFIED_TTL_MS;
+};
 
 const skipLoggedThisSession = new Set<string>();
 
@@ -45,23 +53,51 @@ const logSkipOnce = (key: string, message: string) => {
 };
 
 export const invalidatePrePlayCache = (objectId: string) => {
-  verifiedThisSession.delete(objectId);
+  verifiedAt.delete(objectId);
   notifiedThisSession.delete(objectId);
   for (const key of [...skipLoggedThisSession]) {
     if (key.startsWith(`${objectId}:`)) skipLoggedThisSession.delete(key);
   }
 };
 
-export const trackBusy = <T,>(objectId: string, work: Promise<T>): Promise<T> => {
-  busy.set(objectId, work);
-  work.finally(() => {
-    if (busy.get(objectId) === work) busy.delete(objectId);
-  });
-  return work;
+export const markPrePlayVerified = (objectId: string) => {
+  verifiedAt.set(objectId, Date.now());
+};
+
+export type SyncOperationKey = "sync" | "restore";
+
+interface ActiveOperation {
+  key: SyncOperationKey;
+  promise: Promise<unknown>;
+}
+
+export const trackBusy = <T,>(
+  objectId: string,
+  key: SyncOperationKey,
+  start: () => Promise<T>
+): Promise<T> => {
+  const run = (): Promise<T> => {
+    const promise = start();
+    const entry: ActiveOperation = { key, promise: promise as Promise<unknown> };
+    busy.set(objectId, entry);
+    const settle = () => {
+      if (busy.get(objectId) === entry) busy.delete(objectId);
+    };
+    promise.then(settle, settle);
+    return promise;
+  };
+  const active = busy.get(objectId);
+  if (!active) return run();
+  if (active.key === key) return active.promise as Promise<T>;
+  logEvent(`sync op queued: ${objectId} ${key} behind ${active.key}`);
+  return active.promise.then(run, run);
 };
 
 export const waitForBusy = (objectId: string): Promise<unknown> | undefined =>
-  busy.get(objectId)?.catch(() => {});
+  busy.get(objectId)?.promise.catch(() => {});
+
+export const isOperationActive = (objectId: string): boolean =>
+  busy.has(objectId);
 
 export const findGameByShortcutId = (appId: string): Game | undefined => {
   const key = String(appId);
@@ -78,6 +114,23 @@ export const findGameByShortcutId = (appId: string): Game | undefined => {
 const onGamePageOpen = async (appId: string) => {
   if (!useSyncSettings.getState().syncBeforePlay) {
     logSkipOnce(`page:${appId}:toggle-off`, `toggle off (page appid ${appId})`);
+    return;
+  }
+
+  try {
+    if (await isHydraLauncherRunning()) {
+      logSkipOnce(`page:${appId}:hydra-running`, `hydra launcher running (page appid ${appId})`);
+      if (!hydraRunningToastShown.has(String(appId))) {
+        hydraRunningToastShown.add(String(appId));
+        toaster.toast({
+          title: "Desktop launcher active",
+          body: "Hydra launcher is running, Deck cloud sync is paused to avoid conflicts.",
+        });
+      }
+      return;
+    }
+  } catch (error) {
+    logEvent(`pre-play launcher check failed: ${error instanceof Error ? error.message : "unknown"}`);
     return;
   }
 
@@ -116,7 +169,7 @@ const onGamePageOpen = async (appId: string) => {
     logSkipOnce(`${game.objectId}:auto-sync-off`, `auto-sync off (${game.objectId})`);
     return;
   }
-  if (verifiedThisSession.has(game.objectId)) return;
+  if (isRecentlyVerified(game.objectId)) return;
   if (useCurrentGame.getState().objectId === game.objectId) {
     logSkipOnce(`${game.objectId}:running`, `game running (${game.objectId})`);
     return;
@@ -144,7 +197,8 @@ const onGamePageOpen = async (appId: string) => {
   const work = (async () => {
     let status;
     try {
-      status = await checkCloudSaveStatus(auth, game.objectId, game.winePrefixPath);
+      engagePlayBlock(game.objectId);
+      status = await checkCloudSaveStatus(auth, game.objectId, game.shop, game.winePrefixPath);
     } catch (error) {
       logEvent(`pre-play status failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
       disengagePlayBlock(game.objectId);
@@ -152,8 +206,6 @@ const onGamePageOpen = async (appId: string) => {
     }
     if (status.auth) useAuthStore.getState().setAuth(status.auth);
     useSyncStatusStore.getState().setStatus(game.objectId, {
-      remoteNewer: status.remoteNewer,
-      localDirty: status.localDirty,
       remoteVersion: status.remoteVersion ?? null,
       localVersion: status.localVersion ?? null,
       remoteFileCount: status.remoteFileCount ?? null,
@@ -162,11 +214,10 @@ const onGamePageOpen = async (appId: string) => {
       localFileCount: status.localFileCount ?? null,
       localTotalBytes: status.localTotalBytes ?? null,
       localUpdatedAt: status.localUpdatedAt ?? null,
-      checkedAt: Date.now(),
     });
 
     if (!status.remoteNewer) {
-      verifiedThisSession.add(game.objectId);
+      markPrePlayVerified(game.objectId);
       logEvent(`pre-play verified: ${game.objectId} (remote v${status.remoteVersion ?? "none"})`);
       disengagePlayBlock(game.objectId);
       return;
@@ -176,25 +227,22 @@ const onGamePageOpen = async (appId: string) => {
       logEvent(`auto-restore start: ${game.objectId} (remote v${status.remoteVersion})`);
       showSyncToast(game.objectId, {
         title: game.title,
-        body: (
-          <SyncToastBody
-            text={`Syncing cloud save… (cloud v${status.remoteVersion ?? "?"})`}
-          />
-        ),
+        body: <SyncToastBody text="Syncing cloud save…" />,
         logo: composeToastLogo(game.iconUrl),
-        duration: PLAY_BLOCK_RELEASE_TIMEOUT_MS,
+        duration: SYNC_TOAST_TIMEOUT_MS,
       });
 
       try {
         const result = await trackBusy(
           game.objectId,
-          restoreCloudSave(auth, game.objectId, game.winePrefixPath)
+          "restore",
+          () => restoreCloudSave(auth, game.objectId, game.shop, game.winePrefixPath)
         );
         if (result.auth) useAuthStore.getState().setAuth(result.auth);
 
         if (result.skippedFiles.length === 0) {
           useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
-          verifiedThisSession.add(game.objectId);
+          markPrePlayVerified(game.objectId);
           toaster.toast({
             title: "Cloud save restored",
             body: `${game.title} save is up to date (${result.restoredFiles} files).`,
@@ -235,10 +283,6 @@ const onGamePageOpen = async (appId: string) => {
     }
   })();
 
-  busy.set(game.objectId, work);
-  work.finally(() => {
-    if (busy.get(game.objectId) === work) busy.delete(game.objectId);
-  });
   await work.catch(() => {});
 };
 

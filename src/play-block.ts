@@ -3,10 +3,10 @@ import { toaster } from "@decky/api";
 import { logEvent } from "./events";
 import { dismissSyncToast } from "./sync-toast";
 import { useCloudSaveGuard, usePlayBlockStore } from "./stores";
-import { findGameByShortcutId } from "./pre-play-sync";
+import { findGameByShortcutId, isOperationActive } from "./pre-play-sync";
 import { SYNC_OVERLAY_ATTR } from "./sync-block-overlay";
 
-export const PLAY_BLOCK_RELEASE_TIMEOUT_MS = 15 * 60 * 1000;
+export const PLAY_BLOCK_RELEASE_TIMEOUT_MS = 5 * 60 * 1000;
 const BLOCKED_TOAST_THROTTLE_MS = 5_000;
 
 const releaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -92,17 +92,25 @@ export const engagePlayBlock = (objectId: string) => {
   usePlayBlockStore.getState().engage(objectId);
   logEvent(`play block: engaged ${objectId}`);
 
-  const timer = setTimeout(() => {
-    releaseTimers.delete(objectId);
-    disengagePlayBlock(objectId);
-    logEvent(`play block: release timeout for ${objectId}`);
-    toaster.toast({
-      title: "Save sync is taking long",
-      body: "Play is enabled again. Progress still saves to the cloud after you exit.",
-    });
-  }, PLAY_BLOCK_RELEASE_TIMEOUT_MS);
+  const armReleaseTimer = () => {
+    const timer = setTimeout(() => {
+      releaseTimers.delete(objectId);
+      if (isOperationActive(objectId)) {
+        logEvent(`play block: still busy, extending block for ${objectId}`);
+        armReleaseTimer();
+        return;
+      }
+      disengagePlayBlock(objectId);
+      logEvent(`play block: release timeout for ${objectId}`);
+      toaster.toast({
+        title: "Save sync is taking long",
+        body: "Play is enabled again. Progress still saves to the cloud after you exit.",
+      });
+    }, PLAY_BLOCK_RELEASE_TIMEOUT_MS);
+    releaseTimers.set(objectId, timer);
+  };
 
-  releaseTimers.set(objectId, timer);
+  armReleaseTimer();
 };
 
 export const disengagePlayBlock = (objectId: string) => {

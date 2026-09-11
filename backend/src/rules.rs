@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Result};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use std::collections::HashMap;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 
@@ -30,7 +30,7 @@ pub struct CompiledRule {
 
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct RuleCondition {
 
@@ -52,7 +52,7 @@ struct ManifestIndex {
 
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 
 #[serde(rename_all = "camelCase")]
 
@@ -64,7 +64,7 @@ struct IndexedGame {
 
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 
 #[serde(rename_all = "camelCase")]
 
@@ -434,6 +434,201 @@ impl CompiledRule {
 
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+
+struct SidecarRules {
+
+    index_mtime_secs: u64,
+
+    index_mtime_nanos: u32,
+
+    index_len: u64,
+
+    index_version: u32,
+
+    files: Vec<IndexedRule>,
+
+}
+
+fn plugin_data_dir() -> Result<PathBuf> {
+
+    Ok(dirs::home_dir()
+
+        .ok_or_else(|| anyhow!("No home dir"))?
+
+        .join("homebrew")
+        .join("data")
+        .join("Hydra"))
+
+}
+
+fn sidecar_path(dir: &Path, object_id: &str) -> Option<PathBuf> {
+    if object_id.is_empty()
+        || !object_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+
+        return None;
+
+    }
+
+    Some(dir.join(format!("rules-{object_id}.json")))
+
+}
+
+fn index_fingerprint(path: &Path) -> Option<(u64, u32, u64)> {
+
+    let metadata = std::fs::metadata(path).ok()?;
+
+    let modified = metadata.modified().ok()?;
+
+    let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+
+    Some((duration.as_secs(), duration.subsec_nanos(), metadata.len()))
+
+}
+
+fn read_sidecar(
+    dir: &Path,
+    object_id: &str,
+    mtime_secs: u64,
+    mtime_nanos: u32,
+    len: u64,
+) -> Option<SidecarRules> {
+
+    let path = sidecar_path(dir, object_id)?;
+
+    let content = std::fs::read_to_string(path).ok()?;
+
+    let cached: SidecarRules = serde_json::from_str(&content).ok()?;
+
+    if cached.index_mtime_secs != mtime_secs
+        || cached.index_mtime_nanos != mtime_nanos
+        || cached.index_len != len
+    {
+
+        return None;
+
+    }
+
+    Some(cached)
+
+}
+
+fn write_sidecar(dir: &Path, object_id: &str, cached: &SidecarRules) {
+
+    let Some(path) = sidecar_path(dir, object_id) else {
+
+        return;
+
+    };
+
+    if std::fs::create_dir_all(dir).is_err() {
+
+        return;
+
+    }
+
+    let Ok(content) = serde_json::to_string(cached) else {
+
+        return;
+
+    };
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+
+        let prefix = format!(".rules-{object_id}-");
+
+        for entry in entries.flatten() {
+
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            if !name.starts_with(&prefix) || !name.ends_with(".tmp") {
+
+                continue;
+
+            }
+
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() > 3600);
+
+            if stale {
+
+                let _ = std::fs::remove_file(entry.path());
+
+            }
+
+        }
+
+    }
+
+    let temp = dir.join(format!(".rules-{object_id}-{}.tmp", std::process::id()));
+
+    if std::fs::write(&temp, content).is_err() {
+
+        return;
+
+    }
+
+    if std::fs::rename(&temp, path).is_err() {
+
+        let _ = std::fs::remove_file(temp);
+
+        return;
+
+    }
+
+    if let Ok(legacy_dir) = crate::cloud_save::state_dir() {
+
+        let _ = std::fs::remove_file(legacy_dir.join(format!("rules-{object_id}.json")));
+
+    }
+
+}
+
+fn cached_rules(cached: &SidecarRules) -> Result<Option<GameRules>> {
+
+    if cached.index_version != 1 {
+
+        return Err(anyhow!(
+
+            "Unsupported cloud save manifest index version {}",
+
+            cached.index_version
+
+        ));
+
+    }
+
+    Ok(compile_files(&cached.files))
+
+}
+
+fn compile_files(files: &[IndexedRule]) -> Option<GameRules> {
+
+    let rules: Vec<CompiledRule> = files
+
+        .iter()
+
+        .filter_map(|rule| compile_rule(&rule.raw_path, rule.when.clone()))
+
+        .collect();
+
+    if rules.is_empty() {
+
+        return None;
+
+    }
+
+    Some(GameRules { rules })
+
+}
+
 impl GameRules {
 
     pub fn load(object_id: &str) -> Result<Option<GameRules>> {
@@ -446,9 +641,24 @@ impl GameRules {
 
         }
 
+        if let (Some(dir), Some((mtime_secs, mtime_nanos, len))) = (
+            plugin_data_dir().ok(),
+            index_fingerprint(&path),
+        ) {
+
+            if let Some(cached) = read_sidecar(&dir, object_id, mtime_secs, mtime_nanos, len) {
+
+                return cached_rules(&cached);
+
+            }
+
+        }
+
         let content = std::fs::read_to_string(&path)
 
             .map_err(|e| anyhow!("Failed to read cloud save manifest index: {e}"))?;
+
+        let fingerprint = index_fingerprint(&path);
 
         let index: ManifestIndex = serde_json::from_str(&content)
 
@@ -466,29 +676,32 @@ impl GameRules {
 
         }
 
-        let Some(game) = index.games.get(object_id) else {
+        let files: Vec<IndexedRule> = index
+            .games
+            .get(object_id)
+            .map(|game| game.files.clone())
+            .unwrap_or_default();
 
-            return Ok(None);
+        if let (Some(dir), Some((mtime_secs, mtime_nanos, len))) = (
+            plugin_data_dir().ok(),
+            fingerprint,
+        ) {
 
-        };
-
-        let rules: Vec<CompiledRule> = game
-
-            .files
-
-            .iter()
-
-            .filter_map(|rule| compile_rule(&rule.raw_path, rule.when.clone()))
-
-            .collect();
-
-        if rules.is_empty() {
-
-            return Ok(None);
+            write_sidecar(
+                &dir,
+                object_id,
+                &SidecarRules {
+                    index_mtime_secs: mtime_secs,
+                    index_mtime_nanos: mtime_nanos,
+                    index_len: len,
+                    index_version: index.version,
+                    files: files.clone(),
+                },
+            );
 
         }
 
-        Ok(Some(GameRules { rules }))
+        Ok(compile_files(&files))
 
     }
 
@@ -1022,5 +1235,110 @@ mod tests {
 
     }
 
-}
+    #[test]
 
+    fn plugin_data_dir_lives_under_homebrew_data() {
+
+        let dir = plugin_data_dir().unwrap();
+
+        assert!(dir.ends_with("homebrew/data/Hydra"));
+
+    }
+
+    #[test]
+
+    fn sidecar_round_trip_hits_on_matching_fingerprint() {
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let cached = SidecarRules {
+            index_mtime_secs: 100,
+            index_mtime_nanos: 200,
+            index_len: 300,
+            index_version: 1,
+            files: vec![IndexedRule {
+                raw_path: "<winAppData>/Game".to_string(),
+                when: vec![],
+            }],
+        };
+
+        write_sidecar(dir.path(), "10", &cached);
+
+        let hit = read_sidecar(dir.path(), "10", 100, 200, 300).unwrap();
+
+        assert_eq!(hit.index_version, 1);
+
+        assert_eq!(hit.files.len(), 1);
+
+        assert_eq!(hit.files[0].raw_path, "<winAppData>/Game");
+
+        assert!(compile_files(&hit.files).is_some());
+
+    }
+
+    #[test]
+
+    fn sidecar_misses_on_stale_corrupt_or_foreign_keys() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let cached = SidecarRules {
+            index_mtime_secs: 100,
+            index_mtime_nanos: 200,
+            index_len: 300,
+            index_version: 1,
+            files: vec![],
+        };
+
+        write_sidecar(dir.path(), "10", &cached);
+
+        assert!(read_sidecar(dir.path(), "10", 101, 200, 300).is_none());
+
+        assert!(read_sidecar(dir.path(), "10", 100, 200, 301).is_none());
+
+        assert!(read_sidecar(dir.path(), "11", 100, 200, 300).is_none());
+
+        assert!(read_sidecar(dir.path(), "../evil", 100, 200, 300).is_none());
+
+        std::fs::write(
+            dir.path().join("rules-10.json"),
+            "{not json",
+        )
+        .unwrap();
+
+        assert!(read_sidecar(dir.path(), "10", 100, 200, 300).is_none());
+
+    }
+
+
+    #[test]
+
+    fn cached_rules_rejects_unsupported_index_version() {
+
+        let cached = SidecarRules {
+            index_mtime_secs: 1,
+            index_mtime_nanos: 2,
+            index_len: 3,
+            index_version: 2,
+            files: vec![],
+        };
+
+        assert!(cached_rules(&cached).is_err());
+
+    }
+
+    #[test]
+
+    fn cached_rules_negative_result_compiles_to_none() {
+
+        let cached = SidecarRules {
+            index_mtime_secs: 1,
+            index_mtime_nanos: 2,
+            index_len: 3,
+            index_version: 1,
+            files: vec![],
+        };
+
+        assert!(cached_rules(&cached).unwrap().is_none());
+
+    }
+}

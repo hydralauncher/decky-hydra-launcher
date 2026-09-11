@@ -4,6 +4,7 @@ import { toaster } from "@decky/api";
 import { Button, ConfirmModal, PanelSection, Spinner, showModal } from "@decky/ui";
 import { composeToastLogo, formatBytes } from "./helpers";
 import { useAuthStore, useCloudSaveGuard, useCurrentGame, useUserStore } from "./stores";
+import { disengagePlayBlock, engagePlayBlock } from "./play-block";
 import { restoreCloudSave, syncCloudSave } from "./events";
 import { invalidatePrePlayCache, trackBusy } from "./pre-play-sync";
 import { CheckIcon, CloudIcon } from "./components";
@@ -85,17 +86,21 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       if (!auth || !hasActiveSubscription) return;
 
       setIsSyncing(true);
+      engagePlayBlock(game.objectId);
 
       try {
         const result = await trackBusy(
           game.objectId,
-          syncCloudSave(
-            auth,
-            game.objectId,
-            game.winePrefixPath,
-            force,
-            resolutions ?? null
-          )
+          "sync",
+          () =>
+            syncCloudSave(
+              auth,
+              game.objectId,
+              game.shop,
+              game.winePrefixPath,
+              force,
+              resolutions ?? null
+            )
         );
 
         if (result.auth) setAuth(result.auth);
@@ -127,6 +132,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
 
         useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
         invalidatePrePlayCache(game.objectId);
+        disengagePlayBlock(game.objectId);
 
         toaster.toast({
           title: "Cloud save synced",
@@ -143,6 +149,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         }
 
         console.error(error);
+        disengagePlayBlock(game.objectId);
 
         toaster.toast({
           title: "Failed to sync cloud save",
@@ -156,6 +163,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       auth,
       hasActiveSubscription,
       game.objectId,
+      game.shop,
       game.winePrefixPath,
       game.iconUrl,
       setAuth,
@@ -171,9 +179,10 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         strOKButtonText="Sync Anyway"
         strCancelButtonText="Cancel"
         onOK={() => runSync(true)}
+        onCancel={() => disengagePlayBlock(game.objectId)}
       />
     );
-  }, [runSync]);
+  }, [runSync, game.objectId]);
 
   const syncNow = useCallback(() => runSync(false), [runSync]);
 
@@ -181,6 +190,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     if (!auth || !hasActiveSubscription) return;
 
     setIsRestoring(true);
+    engagePlayBlock(game.objectId);
 
     toaster.toast({
       title: "Restoring cloud save...",
@@ -190,7 +200,8 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     try {
       const result = await trackBusy(
         game.objectId,
-        restoreCloudSave(auth, game.objectId, game.winePrefixPath)
+        "restore",
+        () => restoreCloudSave(auth, game.objectId, game.shop, game.winePrefixPath)
       );
 
       if (result.auth) setAuth(result.auth);
@@ -217,12 +228,14 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         body: error instanceof Error ? error.message : "Unknown error",
       });
     } finally {
+      disengagePlayBlock(game.objectId);
       setIsRestoring(false);
     }
   }, [
     auth,
     hasActiveSubscription,
     game.objectId,
+    game.shop,
     game.winePrefixPath,
     game.iconUrl,
     setAuth,

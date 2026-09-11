@@ -69,12 +69,11 @@ class Plugin:
         result = await _run_backend(["resolve-shortcut", app_id])
         return json.loads(result)
 
-    async def sync_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None, force: bool, resolutions: dict | None = None):
+    async def sync_cloud_save(self, auth: dict, object_id: str, shop: str, wine_prefix: str | None, force: bool, resolutions: dict | None = None):
         args = ["sync-cloud-save", object_id, wine_prefix or ""]
-        if force:
-            args.append("force")
-        if resolutions:
-            args.append(json.dumps(resolutions))
+        args.append("force" if force else "")
+        args.append(json.dumps(resolutions) if resolutions else "")
+        args.append(shop)
         result = await _run_backend(args, json.dumps(auth))
         payload = json.loads(result)
         decky.logger.info(
@@ -83,8 +82,8 @@ class Plugin:
             payload.get("uploadedFiles"), payload.get("skippedFiles"))
         return payload
 
-    async def restore_cloud_save(self, auth: dict, object_id: str, wine_prefix: str | None):
-        result = await _run_backend(["restore-cloud-save", object_id, wine_prefix or ""], json.dumps(auth))
+    async def restore_cloud_save(self, auth: dict, object_id: str, shop: str, wine_prefix: str | None):
+        result = await _run_backend(["restore-cloud-save", object_id, wine_prefix or "", shop], json.dumps(auth))
         payload = json.loads(result)
         decky.logger.info(
             "restore done for %s: version=%s restored=%s skipped=%s",
@@ -92,8 +91,8 @@ class Plugin:
             len(payload.get("skippedFiles", [])))
         return payload
 
-    async def check_cloud_save_status(self, auth: dict, object_id: str, wine_prefix: str | None):
-        result = await _run_backend(["check-cloud-save-status", object_id, wine_prefix or ""], json.dumps(auth), timeout=STATUS_TIMEOUT)
+    async def check_cloud_save_status(self, auth: dict, object_id: str, shop: str, wine_prefix: str | None):
+        result = await _run_backend(["check-cloud-save-status", object_id, wine_prefix or "", shop], json.dumps(auth), timeout=STATUS_TIMEOUT)
         payload = json.loads(result)
         decky.logger.info(
             "status for %s: remoteNewer=%s remote=%s local=%s",

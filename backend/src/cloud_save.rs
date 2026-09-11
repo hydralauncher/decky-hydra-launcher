@@ -518,7 +518,7 @@ pub struct CloudSaveState {
 
 }
 
-fn state_dir() -> Result<PathBuf> {
+pub(crate) fn state_dir() -> Result<PathBuf> {
 
     Ok(dirs::config_dir()
 
@@ -3007,8 +3007,6 @@ pub async fn restore_cloud_save(
     for (index, file) in manifest.files.iter().enumerate() {
 
         if !is_safe_manifest_file(file) || !rules.allows_raw_path(&file.raw_path) {
-
-            needed_hashes.insert(&file.hash);
 
             continue;
 

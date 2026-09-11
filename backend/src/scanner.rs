@@ -328,7 +328,19 @@ impl ScanContext {
 
 }
 
-fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>, visited: &mut HashSet<(u64, u64)>) {
+
+    use std::os::unix::fs::MetadataExt;
+
+    if let Ok(metadata) = std::fs::metadata(dir) {
+
+        if !visited.insert((metadata.dev(), metadata.ino())) {
+
+            return;
+
+        }
+
+    }
 
     let Ok(entries) = std::fs::read_dir(dir) else {
 
@@ -346,7 +358,25 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
         if file_type.is_symlink() {
 
-            if entry.path().is_file() {
+            let resolved = std::fs::metadata(entry.path());
+
+            let is_dir = resolved.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+
+            if is_dir {
+
+                if let Ok(metadata) = resolved {
+
+                    if visited.contains(&(metadata.dev(), metadata.ino())) {
+
+                        continue;
+
+                    }
+
+                }
+
+                walk_files(&entry.path(), out, visited);
+
+            } else if entry.path().is_file() {
 
                 out.push(entry.path());
 
@@ -358,7 +388,7 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
         if file_type.is_dir() {
 
-            walk_files(&entry.path(), out);
+            walk_files(&entry.path(), out, visited);
 
         } else if file_type.is_file() {
 
@@ -428,7 +458,32 @@ pub fn scan_game_saves(ctx: &ScanContext, rules: &GameRules) -> Vec<(PathBuf, St
 
             let mut files = Vec::new();
 
-            walk_files(prefix_path, &mut files);
+            let home = ctx
+                .home_dir
+                .as_ref()
+                .map(|h| h.to_string_lossy().to_string());
+
+            let ancestors: Vec<&str> = [
+                ctx.wine_prefix.as_deref(),
+                home.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+
+            let local = local_prefix.trim_end_matches('/');
+
+            let walkable = !ancestors.iter().any(|root| {
+                let root = root.trim_end_matches('/');
+                local == root || root.starts_with(&format!("{local}/"))
+            });
+
+            if !walkable {
+                eprintln!("scan: refusing to walk at or above root: {local_prefix}");
+                continue;
+            }
+
+            walk_files(prefix_path, &mut files, &mut HashSet::new());
 
             for file in files {
 
@@ -464,3 +519,40 @@ pub fn scan_game_saves(ctx: &ScanContext, rules: &GameRules) -> Vec<(PathBuf, St
 
 }
 
+
+#[cfg(test)]
+
+mod tests {
+
+    use super::*;
+
+    #[test]
+
+    fn walk_terminates_on_symlink_loop_and_finds_linked_files() {
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let real = dir.path().join("real");
+
+        std::fs::create_dir(&real).unwrap();
+
+        std::fs::write(real.join("save.sav"), b"data").unwrap();
+
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+
+        std::os::unix::fs::symlink(dir.path(), real.join("loop")).unwrap();
+
+        let mut out = Vec::new();
+
+        walk_files(dir.path(), &mut out, &mut HashSet::new());
+
+        let names: Vec<String> = out
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        assert!(names.contains(&"save.sav".to_string()));
+
+    }
+
+}
