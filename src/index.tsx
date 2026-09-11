@@ -15,6 +15,7 @@ import { api } from "./hydra-api";
 import { Home } from "./home";
 import { WSClient } from "./ws";
 import { composeToastLogo } from "./helpers";
+import { PiCloudArrowUp } from "react-icons/pi";
 import { GameCloudSaves } from "./game-cloud-saves";
 import { AuthGuide } from "./auth-guide";
 import {
@@ -270,6 +271,7 @@ const onAppLifetimeNotification = async (
           title: "Cloud save synced",
           body: `${game.title} save has been uploaded to the cloud`,
           logo: composeToastLogo(game.iconUrl),
+          icon: <PiCloudArrowUp size={20} />,
         });
         logEvent(`auto-sync done: ${game.objectId} v${result.version}`);
         disengagePlayBlock(game.objectId);

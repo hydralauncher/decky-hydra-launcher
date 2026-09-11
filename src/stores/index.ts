@@ -6,3 +6,4 @@ export * from "./library.store";
 export * from "./navigation.store";
 export * from "./play-block.store";
 export * from "./sync-settings.store";
+export * from "./sync-status.store";

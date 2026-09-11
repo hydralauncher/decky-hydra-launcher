@@ -15,6 +15,7 @@ import {
   useCurrentGame,
   useLibraryStore,
   useSyncSettings,
+  useSyncStatusStore,
   useUserStore,
 } from "./stores";
 import {
@@ -23,6 +24,10 @@ import {
   setActiveAppPage,
 } from "./play-block";
 import { composeToastLogo } from "./helpers";
+import { PiCloudArrowDown } from "react-icons/pi";
+import { showSyncToast, SyncToastBody } from "./sync-toast";
+import { SyncBlockOverlay } from "./sync-block-overlay";
+import { PLAY_BLOCK_RELEASE_TIMEOUT_MS } from "./play-block";
 
 const busy = new Map<string, Promise<unknown>>();
 
@@ -128,6 +133,8 @@ const onGamePageOpen = async (appId: string) => {
     return;
   }
 
+  engagePlayBlock(game.objectId);
+
   if (busy.has(game.objectId)) {
     logSkipOnce(`${game.objectId}:busy`, `attach in-flight (${game.objectId})`);
     await waitForBusy(game.objectId);
@@ -135,23 +142,48 @@ const onGamePageOpen = async (appId: string) => {
   }
 
   const work = (async () => {
-    const status = await checkCloudSaveStatus(auth, game.objectId, game.winePrefixPath);
+    let status;
+    try {
+      status = await checkCloudSaveStatus(auth, game.objectId, game.winePrefixPath);
+    } catch (error) {
+      logEvent(`pre-play status failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
+      disengagePlayBlock(game.objectId);
+      return;
+    }
     if (status.auth) useAuthStore.getState().setAuth(status.auth);
+    useSyncStatusStore.getState().setStatus(game.objectId, {
+      remoteNewer: status.remoteNewer,
+      localDirty: status.localDirty,
+      remoteVersion: status.remoteVersion ?? null,
+      localVersion: status.localVersion ?? null,
+      remoteFileCount: status.remoteFileCount ?? null,
+      remoteTotalBytes: status.remoteTotalBytes ?? null,
+      remoteUpdatedAt: status.remoteUpdatedAt ?? null,
+      localFileCount: status.localFileCount ?? null,
+      localTotalBytes: status.localTotalBytes ?? null,
+      localUpdatedAt: status.localUpdatedAt ?? null,
+      checkedAt: Date.now(),
+    });
 
     if (!status.remoteNewer) {
       verifiedThisSession.add(game.objectId);
       logEvent(`pre-play verified: ${game.objectId} (remote v${status.remoteVersion ?? "none"})`);
+      disengagePlayBlock(game.objectId);
       return;
     }
 
     if (!status.localDirty) {
-      toaster.toast({
-        title: "Syncing cloud save...",
-        body: `${game.title} has a newer save in the cloud; restoring it now.`,
-        logo: composeToastLogo(game.iconUrl),
-      });
       logEvent(`auto-restore start: ${game.objectId} (remote v${status.remoteVersion})`);
-      engagePlayBlock(game.objectId);
+      showSyncToast(game.objectId, {
+        title: game.title,
+        body: (
+          <SyncToastBody
+            text={`Syncing cloud save… (cloud v${status.remoteVersion ?? "?"})`}
+          />
+        ),
+        logo: composeToastLogo(game.iconUrl),
+        duration: PLAY_BLOCK_RELEASE_TIMEOUT_MS,
+      });
 
       try {
         const result = await trackBusy(
@@ -167,12 +199,14 @@ const onGamePageOpen = async (appId: string) => {
             title: "Cloud save restored",
             body: `${game.title} save is up to date (${result.restoredFiles} files).`,
             logo: composeToastLogo(game.iconUrl),
+            icon: <PiCloudArrowDown size={20} />,
           });
         } else {
           toaster.toast({
             title: "Cloud save partially restored",
             body: `${game.title}: ${result.skippedFiles.length} files could not be restored.`,
             logo: composeToastLogo(game.iconUrl),
+            icon: <PiCloudArrowDown size={20} />,
           });
         }
         logEvent(`auto-restore done: ${game.objectId} v${result.version}`);
@@ -190,7 +224,6 @@ const onGamePageOpen = async (appId: string) => {
     }
 
     useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
-    engagePlayBlock(game.objectId);
     if (!notifiedThisSession.has(game.objectId)) {
       notifiedThisSession.add(game.objectId);
       logEvent(`pre-play conflict notice: ${game.objectId}`);
@@ -226,7 +259,7 @@ const AppPageSync = ({ appid }: { appid?: string }) => {
   useEffect(() => {
     if (effectiveAppId) onGamePageOpen(String(effectiveAppId));
   }, [effectiveAppId]);
-  return null;
+  return effectiveAppId ? <SyncBlockOverlay appid={String(effectiveAppId)} /> : null;
 };
 
 let patchHandle: ((route: any) => any) | null = null;

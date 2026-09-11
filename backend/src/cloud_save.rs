@@ -3392,6 +3392,30 @@ pub struct CloudSaveStatus {
 
     #[serde(skip_serializing_if = "Option::is_none")]
 
+    pub remote_file_count: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+
+    pub remote_total_bytes: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+
+    pub remote_updated_at: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+
+    pub local_file_count: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+
+    pub local_total_bytes: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+
+    pub local_updated_at: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+
     pub auth: Option<Auth>,
 
 }
@@ -3570,6 +3594,26 @@ fn status_local_dirty(remote_newer: bool, fast_forward: bool, dirty_assessed: Op
     }
 
     dirty_assessed.unwrap_or(true)
+
+}
+
+fn local_snapshot_summary(files: &[(u64, &str)]) -> (u64, u64, Option<String>) {
+
+    let updated_at = files
+        .iter()
+        .filter_map(|(_, modified_at)| {
+            chrono::DateTime::parse_from_rfc3339(modified_at)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .ok()
+        })
+        .max()
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+
+    (
+        files.len() as u64,
+        files.iter().map(|(size, _)| size).sum(),
+        updated_at,
+    )
 
 }
 
@@ -3960,7 +4004,13 @@ pub async fn check_cloud_save_status(
 
                                 dirty_assessed = Some(!safe);
 
-                                if !safe {
+                                if !safe && fast_forward {
+
+                                    eprintln!("status: local differs from remote, fast-forward safe");
+
+                                }
+
+                                if !safe && !fast_forward {
 
                                     eprintln!("status: restore unsafe, local dirty");
 
@@ -4068,6 +4118,26 @@ pub async fn check_cloud_save_status(
 
     let local_dirty = status_local_dirty(remote_newer, fast_forward, dirty_assessed);
 
+    let (local_file_count, local_total_bytes, local_updated_at) = match &discovery {
+
+        Some(discovered) => {
+
+            let entries: Vec<(u64, &str)> = discovered
+                .files
+                .iter()
+                .map(|f| (f.entry.size_bytes, f.entry.last_modified_at.as_str()))
+                .collect();
+
+            let (count, bytes, updated_at) = local_snapshot_summary(&entries);
+
+            (Some(count), Some(bytes), updated_at)
+
+        }
+
+        None => (None, None, None),
+
+    };
+
     Ok(CloudSaveStatus {
 
         ok: true,
@@ -4079,6 +4149,18 @@ pub async fn check_cloud_save_status(
         remote_version: latest.map(|s| s.version),
 
         local_version: state.map(|s| s.version),
+
+        remote_file_count: latest.map(|s| s.file_count),
+
+        remote_total_bytes: latest.map(|s| s.total_size_bytes),
+
+        remote_updated_at: latest.map(|s| s.updated_at.clone()),
+
+        local_file_count,
+
+        local_total_bytes,
+
+        local_updated_at,
 
         auth: Some(auth),
 
@@ -4113,6 +4195,38 @@ mod tests {
             size_bytes,
 
         }
+
+    }
+
+    #[test]
+
+    fn local_snapshot_summary_picks_max_mtime() {
+
+        let (count, bytes, updated) = local_snapshot_summary(&[
+            (10u64, "2026-08-19T22:49:54.000Z"),
+            (20u64, "2026-09-10T17:42:46.670Z"),
+            (30u64, "not-a-timestamp"),
+        ]);
+
+        assert_eq!(count, 3);
+
+        assert_eq!(bytes, 60);
+
+        assert_eq!(updated.as_deref(), Some("2026-09-10T17:42:46.670Z"));
+
+    }
+
+    #[test]
+
+    fn local_snapshot_summary_empty_has_no_timestamp() {
+
+        let (count, bytes, updated) = local_snapshot_summary(&[]);
+
+        assert_eq!(count, 0);
+
+        assert_eq!(bytes, 0);
+
+        assert_eq!(updated, None);
 
     }
 

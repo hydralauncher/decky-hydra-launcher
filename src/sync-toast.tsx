@@ -1,0 +1,39 @@
+import { toaster } from "@decky/api";
+import type { ToastData, ToastNotification } from "@decky/api";
+import { Spinner } from "@decky/ui";
+import type { CSSProperties } from "react";
+
+const activeToasts = new Map<string, ToastNotification>();
+
+export const showSyncToast = (objectId: string, data: ToastData) => {
+  dismissSyncToast(objectId);
+  try {
+    activeToasts.set(objectId, toaster.toast(data));
+  } catch {
+    return;
+  }
+};
+
+export const dismissSyncToast = (objectId: string) => {
+  const toast = activeToasts.get(objectId);
+  if (!toast) return;
+  activeToasts.delete(objectId);
+  try {
+    toast.dismiss();
+  } catch {
+    return;
+  }
+};
+
+const rowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "12px",
+};
+
+export const SyncToastBody = ({ text }: { text: string }) => (
+  <div style={rowStyle}>
+    <Spinner />
+    <span>{text}</span>
+  </div>
+);

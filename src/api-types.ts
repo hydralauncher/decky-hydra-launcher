@@ -46,6 +46,12 @@ export interface CloudSaveStatus {
   localDirty: boolean;
   remoteVersion: number | null;
   localVersion: number | null;
+  remoteFileCount?: number | null;
+  remoteTotalBytes?: number | null;
+  remoteUpdatedAt?: string | null;
+  localFileCount?: number | null;
+  localTotalBytes?: number | null;
+  localUpdatedAt?: string | null;
   auth?: Auth;
 }
 

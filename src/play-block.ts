@@ -1,11 +1,10 @@
 import { toaster } from "@decky/api";
 
 import { logEvent } from "./events";
+import { dismissSyncToast } from "./sync-toast";
 import { useCloudSaveGuard, usePlayBlockStore } from "./stores";
 import { findGameByShortcutId } from "./pre-play-sync";
-
-const PLAY_CLASS_FRAGMENT = "PlayButton";
-const APP_HEADER_FRAGMENT = "AppDetailsHeader";
+import { SYNC_OVERLAY_ATTR } from "./sync-block-overlay";
 
 export const PLAY_BLOCK_RELEASE_TIMEOUT_MS = 15 * 60 * 1000;
 const BLOCKED_TOAST_THROTTLE_MS = 5_000;
@@ -18,39 +17,38 @@ export const setActiveAppPage = (appId: string | null) => {
 };
 
 let lastBlockedToast = 0;
-const selectorMissLogged = new Set<string>();
+const blockedAttemptLogged = new Set<string>();
 
-const isVisible = (el: HTMLElement) =>
-  el.offsetWidth > 0 && el.offsetHeight > 0;
+let qamOpen = false;
+export const setQamOpen = (open: boolean) => {
+  qamOpen = open;
+};
 
-export const findPlayButton = (): HTMLElement | null => {
-  const candidates = Array.from(
-    document.querySelectorAll<HTMLElement>(`[class*="${PLAY_CLASS_FRAGMENT}"]`)
-  );
-
-  const isControl = (el: HTMLElement) =>
-    el.tagName === "BUTTON" || el.getAttribute("role") === "button";
-
-  const controls = candidates.filter((el) => isControl(el) && isVisible(el));
-  if (controls.length === 0) return null;
-
-  const inHeader = controls.filter((el) =>
-    el.closest(`[class*="${APP_HEADER_FRAGMENT}"]`)
-  );
-  return (inHeader[0] ?? controls[0]) ?? null;
+const isActivationKey = (event: Event): boolean => {
+  if (event.type === "click" || event.type === "touchstart") return true;
+  if (event.type === "keydown" || event.type === "keyup") {
+    const key = (event as KeyboardEvent).key;
+    return key === "Enter" || key === " ";
+  }
+  return false;
 };
 
 const isBlockedPlayTarget = (event: Event): boolean => {
+  if (!isActivationKey(event)) return false;
+  if (qamOpen) return false;
   const store = usePlayBlockStore.getState();
   if (!activeAppPageId || store.blockedGames.size === 0) return false;
 
   const objectId = activeGameForPage();
   if (!objectId || !store.blockedGames.has(objectId)) return false;
 
-  const target = event.target as HTMLElement | null;
-  if (!target) return false;
-  const play = findPlayButton();
-  return play ? play.contains(target) : false;
+  const target = event.target as Element | null;
+  if (!target || typeof target !== "object") return false;
+  if ((target as Node).nodeType !== 1) return false;
+  const element = target as Element;
+  if (typeof element.closest !== "function") return false;
+  if (element.closest(`[${SYNC_OVERLAY_ATTR}]`)) return false;
+  return true;
 };
 
 const activeGameForPage = (): string | null =>
@@ -80,8 +78,8 @@ const blockEvent = (event: Event) => {
             body: "Play is available as soon as the cloud save finishes syncing.",
           }
     );
-    if (!selectorMissLogged.has(`attempt-${objectId}`)) {
-      selectorMissLogged.add(`attempt-${objectId}`);
+    if (!blockedAttemptLogged.has(objectId)) {
+      blockedAttemptLogged.add(objectId);
       logEvent(`play block: blocked attempt on ${objectId}`);
     }
   }
@@ -93,28 +91,6 @@ export const engagePlayBlock = (objectId: string) => {
 
   usePlayBlockStore.getState().engage(objectId);
   logEvent(`play block: engaged ${objectId}`);
-
-  if (!selectorMissLogged.has(objectId)) {
-    const candidates = document.querySelectorAll(`[class*="${PLAY_CLASS_FRAGMENT}"]`).length;
-    const controls = Array.from(
-      document.querySelectorAll<HTMLElement>(`[class*="${PLAY_CLASS_FRAGMENT}"]`)
-    ).filter(
-      (el) =>
-        (el.tagName === "BUTTON" || el.getAttribute("role") === "button") &&
-        el.offsetWidth > 0 &&
-        el.offsetHeight > 0
-    ).length;
-    const inHeader = Array.from(
-      document.querySelectorAll<HTMLElement>(`[class*="${PLAY_CLASS_FRAGMENT}"]`)
-    ).filter((el) => el.closest(`[class*="${APP_HEADER_FRAGMENT}"]`)).length;
-    const found = findPlayButton();
-    if (!found) {
-      selectorMissLogged.add(objectId);
-      logEvent(
-        `play block: no Play button for ${objectId} (candidates=${candidates} controls=${controls} inHeader=${inHeader})`
-      );
-    }
-  }
 
   const timer = setTimeout(() => {
     releaseTimers.delete(objectId);
@@ -130,32 +106,42 @@ export const engagePlayBlock = (objectId: string) => {
 };
 
 export const disengagePlayBlock = (objectId: string) => {
+  dismissSyncToast(objectId);
   if (!usePlayBlockStore.getState().blockedGames.has(objectId)) return;
   const timer = releaseTimers.get(objectId);
   if (timer) {
     clearTimeout(timer);
     releaseTimers.delete(objectId);
   }
-  selectorMissLogged.delete(objectId);
-  selectorMissLogged.delete(`attempt-${objectId}`);
+  blockedAttemptLogged.delete(objectId);
   usePlayBlockStore.getState().disengage(objectId);
   logEvent(`play block: disengaged ${objectId}`);
 };
 
 let registered = false;
 
+const BLOCKED_EVENT_TYPES = ["click", "touchstart", "keydown", "keyup"] as const;
+
+export const attachBlockListeners = (doc: Document) => {
+  for (const type of BLOCKED_EVENT_TYPES) {
+    doc.addEventListener(type, blockEvent, { capture: true });
+  }
+};
+
+export const detachBlockListeners = (doc: Document) => {
+  for (const type of BLOCKED_EVENT_TYPES) {
+    doc.removeEventListener(type, blockEvent, { capture: true });
+  }
+};
+
 export const registerPlayBlock = () => {
   if (registered) return;
   registered = true;
-  for (const type of ["click", "touchstart", "keydown", "keyup"] as const) {
-    document.addEventListener(type, blockEvent, { capture: true });
-  }
+  attachBlockListeners(document);
 };
 
 export const unregisterPlayBlock = () => {
   if (!registered) return;
   registered = false;
-  for (const type of ["click", "touchstart", "keydown", "keyup"] as const) {
-    document.removeEventListener(type, blockEvent, { capture: true });
-  }
+  detachBlockListeners(document);
 };
