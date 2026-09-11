@@ -1,4 +1,4 @@
-import { routerHook, toaster } from "@decky/api";
+import { routerHook, toaster, type RoutePatch } from "@decky/api";
 import { useEffect, type ReactNode } from "react";
 
 import type { Game } from "./api-types";
@@ -306,7 +306,7 @@ const AppPageSync = ({ appid }: { appid?: string }) => {
   return effectiveAppId ? <SyncBlockOverlay appid={String(effectiveAppId)} /> : null;
 };
 
-let patchHandle: ((route: any) => any) | null = null;
+let patchHandle: RoutePatch | null = null;
 
 useCloudSaveGuard.subscribe((state, prev) => {
   for (const id of prev.remoteNewerGames) {
@@ -318,7 +318,19 @@ useCloudSaveGuard.subscribe((state, prev) => {
 
 const WRAPPED = "__hydraPrePlayWrapped";
 
-function withSyncTracking(rendered: ReactNode, props: any) {
+interface AppPageRouteProps {
+  match?: { params?: { appid?: string } } | null;
+}
+
+interface PatchableRoute {
+  children?: ReactNode | ((props: AppPageRouteProps) => ReactNode);
+  component?: unknown;
+  render?: unknown;
+  renderFunc?: unknown;
+  element?: unknown;
+}
+
+function withSyncTracking(rendered: ReactNode, props: AppPageRouteProps) {
   return (
     <>
       <AppPageSync appid={props?.match?.params?.appid} />
@@ -327,7 +339,7 @@ function withSyncTracking(rendered: ReactNode, props: any) {
   );
 }
 
-function routeShape(route: any): string {
+function routeShape(route: PatchableRoute | null): string {
   if (!route) return "null";
   if (route.component) return "component";
   if (typeof route.render === "function") return "render";
@@ -337,29 +349,30 @@ function routeShape(route: any): string {
 }
 
 export const registerPrePlaySync = () => {
-  const patch = (route: any) => {
-    if (!route || route[WRAPPED]) return route;
-    logEvent(`pre-play patch applied: shape=${routeShape(route)}`);
-    if (route.children !== undefined && route.children !== null) {
-      const children = route.children;
+  const patch: RoutePatch = (route) => {
+    const target = route as PatchableRoute | null;
+    if (!target || (target as Record<string, unknown>)[WRAPPED]) return route;
+    logEvent(`pre-play patch applied: shape=${routeShape(target)}`);
+    if (target.children !== undefined && target.children !== null) {
+      const children = target.children;
       return {
-        ...route,
+        ...target,
         [WRAPPED]: true,
         children:
           typeof children === "function"
-            ? (props: any) => withSyncTracking(children(props), props)
+            ? (props: AppPageRouteProps) => withSyncTracking(children(props), props)
             : withSyncTracking(children, {}),
       };
     }
     return route;
   };
   patchHandle = patch;
-  routerHook.addPatch("/library/app/:appid", patch as any);
+  routerHook.addPatch("/library/app/:appid", patch);
 };
 
 export const unregisterPrePlaySync = () => {
   if (patchHandle) {
-    routerHook.removePatch("/library/app/:appid", patchHandle as any);
+    routerHook.removePatch("/library/app/:appid", patchHandle);
     patchHandle = null;
   }
 };

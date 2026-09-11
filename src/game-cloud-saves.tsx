@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./hydra-api";
 import { toaster } from "@decky/api";
-import { Button, ConfirmModal, PanelSection, Spinner, showModal } from "@decky/ui";
+import { Button, ConfirmModal, DialogBody, DialogBodyText, DialogButtonPrimary, DialogFooter, DialogHeader, ModalRoot, PanelSection, Spinner, showModal } from "@decky/ui";
+import type { ShowModalResult } from "@decky/ui";
 import { composeToastLogo, formatBytes } from "./helpers";
 import { useAuthStore, useCloudSaveGuard, useCurrentGame, useUserStore } from "./stores";
 import { disengagePlayBlock, engagePlayBlock } from "./play-block";
@@ -15,6 +16,27 @@ import type { CloudSaveSnapshotSummary, Game, GameArtifact } from "./api-types";
 export interface GameCloudSavesProps {
   game: Game;
 }
+
+const QamConflictModal = ({
+  description,
+  onLocal,
+  onCloud,
+}: {
+  description: string;
+  onLocal: () => void;
+  onCloud: () => void;
+}) => (
+  <ModalRoot onCancel={() => undefined} onEscKeypress={() => undefined}>
+    <DialogHeader>Cloud Save Conflict</DialogHeader>
+    <DialogBody>
+      <DialogBodyText>{description}</DialogBodyText>
+    </DialogBody>
+    <DialogFooter>
+      <DialogButtonPrimary onClick={onLocal}>Keep Local</DialogButtonPrimary>
+      <DialogButtonPrimary onClick={onCloud}>Keep Cloud</DialogButtonPrimary>
+    </DialogFooter>
+  </ModalRoot>
+);
 
 export function GameCloudSaves({ game }: GameCloudSavesProps) {
   const [isSyncing, setIsSyncing] = useState(false);
@@ -133,6 +155,19 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     setAuth,
   ]);
 
+  const confirmForceSync = useCallback((retry: () => void) => {
+    showModal(
+      <ConfirmModal
+        strTitle="Overwrite Newer Cloud Save?"
+        strDescription="A newer cloud save exists for this game. Syncing now will overwrite it with your local save."
+        strOKButtonText="Sync Anyway"
+        strCancelButtonText="Cancel"
+        onOK={retry}
+        onCancel={() => disengagePlayBlock(game.objectId)}
+      />
+    );
+  }, [game.objectId]);
+
   const runSync = useCallback(
     async (
       force: boolean,
@@ -162,6 +197,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
 
         if (!result.ok && result.conflict) {
           setIsSyncing(false);
+          useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
           const names = result.conflict.map((identity) => {
             const parts = identity.split("\u0000");
             return parts.slice(1).join("/");
@@ -173,14 +209,19 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
             }
             runSync(true);
           };
-          showModal(
-            <ConfirmModal
-              strTitle="Cloud Save Conflict"
-              strDescription={`Both this device and the cloud changed ${names.length} file(s): ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}. Everything else merges automatically; choose the side for these.`}
-              strOKButtonText="Keep Local"
-              strCancelButtonText="Keep Cloud"
-              onOK={() => resolveAll("local")}
-              onCancel={() => resolveAll("remote")}
+          let conflictModal: ShowModalResult | null = null;
+          const dismissConflictModal = () => conflictModal?.Close();
+          conflictModal = showModal(
+            <QamConflictModal
+              description={`Both this device and the cloud changed ${names.length} file(s): ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}. Everything else merges automatically; choose the side for these.`}
+              onLocal={() => {
+                dismissConflictModal();
+                resolveAll("local");
+              }}
+              onCloud={() => {
+                dismissConflictModal();
+                resolveAll("remote");
+              }}
             />
           );
           return;
@@ -200,7 +241,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       } catch (error: unknown) {
         if (error instanceof Error && error.message.includes("remote-newer")) {
           setIsSyncing(false);
-          confirmForceSync();
+          confirmForceSync(() => runSync(true));
           return;
         }
 
@@ -225,24 +266,11 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       setAuth,
       getSnapshot,
       restore,
+      confirmForceSync,
     ]
   );
 
-  const confirmForceSync = useCallback(() => {
-    showModal(
-      <ConfirmModal
-        strTitle="Overwrite Newer Cloud Save?"
-        strDescription="A newer cloud save exists for this game. Syncing now will overwrite it with your local save."
-        strOKButtonText="Sync Anyway"
-        strCancelButtonText="Cancel"
-        onOK={() => runSync(true)}
-        onCancel={() => disengagePlayBlock(game.objectId)}
-      />
-    );
-  }, [runSync, game.objectId]);
-
   const syncNow = useCallback(() => runSync(false), [runSync]);
-
 
   const confirmRestore = useCallback(() => {
     showModal(
