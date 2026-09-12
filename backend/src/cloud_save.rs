@@ -1749,6 +1749,110 @@ pub async fn sync_cloud_save(
 
         }
 
+        if force {
+
+            if let Some(remote) = snapshots.last() {
+
+                match fetch_restore_manifest(&client, &remote.id).await {
+
+                    Ok(manifest) => {
+
+                        let state = read_state(shop, object_id, &prefix_key(operative.as_deref()));
+
+                        let environment_id = crate::environment::resolve_game_environment(shop, object_id)
+                            .map(|environment| environment.id);
+
+                        let anchor = crate::hydra::get_sync_anchor(
+                            object_id,
+                            shop,
+                            environment_id.as_deref(),
+                        );
+
+                        let from_state = state
+                            .as_ref()
+                            .and_then(|s| s.entries.clone().map(|e| (s.version, e)));
+
+                        let from_anchor = anchor
+                            .as_ref()
+                            .filter(|a| !a.entries.is_empty())
+                            .map(|a| (a.base_version, a.entries.clone()));
+
+                        let base_entries = match (from_state, from_anchor) {
+
+                            (Some((sv, se)), Some((av, ae))) => {
+
+                                if sv >= av { Some(se) } else { Some(ae) }
+
+                            }
+
+                            (Some((_, se)), None) => Some(se),
+
+                            (None, Some((_, ae))) => Some(ae),
+
+                            (None, None) => None,
+
+                        };
+
+                        if let Some(base_entries) = base_entries.filter(|e| !e.is_empty()) {
+
+                            let base_exclude: std::collections::HashSet<String> = anchor
+                                .map(|a| a.unresolved_entry_ids.into_iter().collect())
+                                .unwrap_or_default();
+
+                            let remote_files: Vec<SnapshotFileEntry> = manifest
+                                .files
+                                .iter()
+                                .map(|f| SnapshotFileEntry {
+                                    variant_id: f.variant_id.clone(),
+                                    raw_path: f.raw_path.clone(),
+                                    relative_path: f.relative_path.clone(),
+                                    hash: f.hash.clone(),
+                                    size_bytes: f.size_bytes,
+                                    last_modified_at: f.last_modified_at.clone(),
+                                })
+                                .collect();
+
+                            match crate::merge::merge_snapshots(
+                                &files,
+                                &remote_files,
+                                Some(&base_entries),
+                                &base_exclude,
+                            ) {
+
+                                Ok(outcome) => {
+
+                                    pre_resolution = outcome
+                                        .conflicts
+                                        .iter()
+                                        .map(|c| c.identity.clone())
+                                        .collect();
+
+                                }
+
+                                Err(err) => {
+
+                                    eprintln!("sync force analysis skipped merge: {err:#}");
+
+                                }
+
+                            }
+
+                        }
+
+                    }
+
+                    Err(err) => {
+
+                        eprintln!("sync force analysis skipped manifest fetch: {err:#}");
+
+                    }
+
+                }
+
+            }
+
+        }
+
         let total_size: u64 = files.iter().map(|f| f.size_bytes).sum();
 
         if files.len() > MAX_SNAPSHOT_FILES {
@@ -1773,6 +1877,8 @@ pub async fn sync_cloud_save(
 
         let base_version = snapshots.last().map(|s| s.version).unwrap_or(0);
 
+        let mut no_op_manifest: Option<Vec<crate::hydra::AnchorWriteEntry>> = None;
+
         if let Some(remote) = snapshots.last() {
 
             let identity_equal = aggregate_hash == remote.aggregate_hash;
@@ -1784,6 +1890,20 @@ pub async fn sync_cloud_save(
                 match fetch_restore_manifest(&client, &remote.id).await {
 
                     Ok(manifest) => {
+
+                        no_op_manifest = Some(
+                            manifest
+                                .files
+                                .iter()
+                                .map(|f| crate::hydra::AnchorWriteEntry {
+                                    variant_id: f.variant_id.clone(),
+                                    raw_path: f.raw_path.clone(),
+                                    relative_path: f.relative_path.clone(),
+                                    hash: f.hash.clone(),
+                                    size_bytes: f.size_bytes,
+                                })
+                                .collect(),
+                        );
 
                         let mut local_blobs: Vec<(&str, u64)> = files
 
@@ -1846,6 +1966,20 @@ pub async fn sync_cloud_save(
                     read_state(shop, object_id, &prefix_key(operative.as_deref())).and_then(|s| s.entries)
 
                 };
+
+                if let Some(entries) = no_op_manifest {
+
+                    persist_sync_anchor(
+                        shop,
+                        object_id,
+                        &remote.id,
+                        remote.version,
+                        &remote.aggregate_hash,
+                        &entries,
+                        &[],
+                    );
+
+                }
 
                 write_state_logged(
 

@@ -47,14 +47,17 @@ def _prune_old_logs() -> None:
 _prune_old_logs()
 
 BACKEND_TIMEOUT = 4 * 60 * 60
-STATUS_TIMEOUT = 30
+STATUS_TIMEOUT = 120
 SYNC_TIMEOUT = 90 * 60
 RESTORE_TIMEOUT = 60 * 60
 
 _SAFE_ARG = re.compile(r"^[A-Za-z0-9_./~ -]{1,200}$")
 
 def _loggable_args(args: list[str]) -> str:
-    return " ".join(a if _SAFE_ARG.match(a) else "<redacted>" for a in args)
+    return " ".join(
+        a if a in ("", "force") or _SAFE_ARG.match(a) else "<redacted>"
+        for a in args
+    )
 
 async def _run_backend(args: list[str], stdin_data: str | None = None, timeout: int = BACKEND_TIMEOUT) -> str:
     decky.logger.info("backend call: %s", _loggable_args(args))
