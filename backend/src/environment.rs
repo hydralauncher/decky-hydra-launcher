@@ -5,6 +5,9 @@ const CLOUD_SAVE_ENVIRONMENT_MARKER: &str = ".hydra-cloud-save-environment-id";
 
 const ANCHOR_IDENTITY_VERSION: u32 = 2;
 
+const MILLIS_PER_SECOND: f64 = 1000.0;
+const NANOS_PER_MILLISECOND: f64 = 1_000_000.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefixIdentityMode {
     Marker,
@@ -93,7 +96,7 @@ fn birthtime_ms(metadata: &std::fs::Metadata) -> Option<f64> {
         std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, nanos))
     })?;
     let duration = created.duration_since(std::time::UNIX_EPOCH).ok()?;
-    Some(duration.as_secs() as f64 * 1000.0 + f64::from(duration.subsec_nanos()) / 1_000_000.0)
+    Some(duration.as_secs() as f64 * MILLIS_PER_SECOND + f64::from(duration.subsec_nanos()) / NANOS_PER_MILLISECOND)
 }
 
 fn file_identity(path: &Path) -> Option<String> {

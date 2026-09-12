@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 
 import { Button, ConfirmModal } from "@decky/ui";
-import { closeActiveModal, showSingleModal } from "./modal";
+import { showSingleModal } from "./modal";
 import { useDate } from "./hooks";
 import { api } from "./hydra-api";
 import { exportGameArtifact } from "./events";
@@ -19,12 +19,6 @@ export function GameCloudSave({
   game,
 }: GameCloudSaveProps) {
   const { formatDate, formatDateTime } = useDate();
-
-  useEffect(() => {
-    return () => {
-      closeActiveModal();
-    };
-  }, []);
   const [isExporting, setIsExporting] = useState(false);
 
   const exportArtifact = useCallback(async () => {

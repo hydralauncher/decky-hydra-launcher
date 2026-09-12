@@ -6,8 +6,10 @@ import { isHydraLauncherRunning } from "../events";
 
 export class WSClient {
   private static ws: WebSocket | null = null;
-  private static reconnectInterval = 1_000;
+  private static readonly initialReconnectInterval = 1_000;
+  private static reconnectInterval = WSClient.initialReconnectInterval;
   private static readonly maxReconnectInterval = 30_000;
+  private static readonly reconnectBackoffMultiplier = 2;
   private static shouldReconnect = true;
   private static reconnecting = false;
   private static reconnectTimer: number | null = null;
@@ -26,7 +28,7 @@ export class WSClient {
 
       this.ws.onopen = () => {
         console.info("WS connected");
-        this.reconnectInterval = 1000;
+        this.reconnectInterval = WSClient.initialReconnectInterval;
         this.reconnecting = false;
         this.startHeartbeat();
       };
@@ -94,7 +96,7 @@ export class WSClient {
 
     const delay = this.reconnectInterval;
     this.reconnectInterval = Math.min(
-      this.reconnectInterval * 2,
+      this.reconnectInterval * WSClient.reconnectBackoffMultiplier,
       this.maxReconnectInterval
     );
 
