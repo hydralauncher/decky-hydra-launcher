@@ -11,6 +11,11 @@ export const showSingleModal = (node: ReactNode): ShowModalResult => {
 };
 
 export const closeActiveModal = () => {
-  activeModal?.Close();
-  activeModal = null;
+  try {
+    activeModal?.Close();
+  } catch {
+    return;
+  } finally {
+    activeModal = null;
+  }
 };
