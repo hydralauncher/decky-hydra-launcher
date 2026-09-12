@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 echo "--- Rust version info ---"
 rustup --version
@@ -11,5 +12,4 @@ mkdir -p out
 cp target/release/backend out/backend
 
 echo " --- Cleaning up ---"
-# remove root-owned target folder
 cargo clean

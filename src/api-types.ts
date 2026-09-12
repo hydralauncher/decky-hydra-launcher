@@ -9,10 +9,62 @@ export interface GameArtifact {
   label?: string;
 }
 
+export interface CloudSaveSnapshotSummary {
+  id: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  fileCount: number;
+  totalSizeBytes: number;
+  aggregateHash: string;
+}
+
+export interface CloudSaveSyncResult {
+  ok: boolean;
+  conflict?: string[];
+  snapshotId: string;
+  version: number;
+  fileCount: number;
+  totalSizeBytes: number;
+  uploadedFiles: number;
+  skippedFiles: number;
+  auth?: Auth;
+}
+
+export interface CloudSaveRestoreResult {
+  ok: boolean;
+  snapshotId: string;
+  version: number;
+  restoredFiles: number;
+  skippedFiles: string[];
+  auth?: Auth;
+}
+
+export interface CloudSaveStatus {
+  ok: boolean;
+  remoteNewer: boolean;
+  localDirty: boolean;
+  remoteVersion: number | null;
+  localVersion: number | null;
+  remoteFileCount?: number | null;
+  remoteTotalBytes?: number | null;
+  remoteUpdatedAt?: string | null;
+  localFileCount?: number | null;
+  localTotalBytes?: number | null;
+  localUpdatedAt?: string | null;
+  auth?: Auth;
+}
+
+export interface ShortcutResolution {
+  objectId: string;
+  shop: string;
+  source: string;
+}
+
 export interface Auth {
   accessToken: string;
   refreshToken: string;
-  tokenExpirationTimestamp: number;
+  tokenExpirationTimestamp?: number;
 }
 
 export interface GameAssets {
@@ -31,9 +83,11 @@ export interface Game {
   title: string;
   iconUrl: string;
   objectId: string;
-  shop: "steam";
+  shop: string;
   winePrefixPath: string | null;
   automaticCloudSync: boolean;
+  isDeleted?: boolean;
+  steamShortcutAppId?: number;
 }
 
 export interface User {

@@ -4,6 +4,9 @@ import sass from "sass";
 
 export default deckyPlugin({
   // Add your extra Rollup options here
+  output: {
+    sourcemapExcludeSources: true,
+  },
   plugins: [
     scss({
       output: false,

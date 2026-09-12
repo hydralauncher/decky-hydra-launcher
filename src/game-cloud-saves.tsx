@@ -1,87 +1,253 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./hydra-api";
 import { toaster } from "@decky/api";
-import { Button, PanelSection, Spinner } from "@decky/ui";
-import { composeToastLogo } from "./helpers";
-import { useAuthStore, useCurrentGame, useUserStore } from "./stores";
-import { backupAndUpload } from "./events";
+import { Button, ConfirmModal, PanelSection, Spinner } from "@decky/ui";
+import { closeActiveModal, showSingleModal } from "./modal";
+import { composeToastLogo, formatBytes } from "./helpers";
+import { useAuthStore, useCloudSaveGuard, useCurrentGame, useUserStore } from "./stores";
+import { disengagePlayBlock, engagePlayBlock } from "./play-block";
+import { restoreCloudSave, syncCloudSave } from "./events";
+import { invalidatePrePlayCache, trackBusy } from "./pre-play-sync";
 import { CheckIcon, CloudIcon } from "./components";
 import { useDate } from "./hooks";
 import { GameCloudSave } from "./game-cloud-save";
-import type { Game, GameArtifact } from "./api-types";
+import type { CloudSaveSnapshotSummary, Game, GameArtifact } from "./api-types";
 
 export interface GameCloudSavesProps {
   game: Game;
 }
 
 export function GameCloudSaves({ game }: GameCloudSavesProps) {
-  const [isCreatingBackup, setIsCreatingBackup] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(false);
+  const [snapshotState, setSnapshotState] = useState<
+    "loading" | "ready" | "error"
+  >("loading");
+  const [snapshot, setSnapshot] = useState<CloudSaveSnapshotSummary | null>(
+    null
+  );
   const [artifacts, setArtifacts] = useState<GameArtifact[]>([]);
+  const [hasConflict, setHasConflict] = useState(false);
 
-  const { auth } = useAuthStore();
-  const { user, hasActiveSubscription } = useUserStore();
+  useEffect(() => {
+    return () => {
+      closeActiveModal();
+    };
+  }, []);
+
+  const { auth, setAuth } = useAuthStore();
+  const { hasActiveSubscription } = useUserStore();
   const { objectId } = useCurrentGame();
+  const isRemoteNewer = useCloudSaveGuard((state) =>
+    state.remoteNewerGames.includes(game.objectId)
+  );
 
-  const { formatDate } = useDate();
+  const { formatDateTime } = useDate();
 
   const isGameRunning = objectId === game.objectId;
+  const canSync = Boolean(auth && hasActiveSubscription);
 
-  const getArtifacts = useCallback(async () => {
-    const artifacts = await api
-      .get<GameArtifact[]>(
-        `profile/games/artifacts?objectId=${game.objectId}&shop=steam`
-      )
-      .json();
+  const getSnapshot = useCallback(async () => {
+    setSnapshotState("loading");
+    try {
+      const snapshots = await api
+        .get<CloudSaveSnapshotSummary[]>(
+          `profile/cloud-saves/snapshots?objectId=${game.objectId}&shop=steam`
+        )
+        .json();
 
-    setArtifacts(artifacts);
+      const latest = snapshots.sort((a, b) => b.version - a.version)[0];
+      setSnapshot(latest ?? null);
+      setSnapshotState("ready");
+    } catch (error: unknown) {
+      console.error("Failed to load cloud save snapshot", error);
+      setSnapshot(null);
+      setSnapshotState("error");
+    }
+  }, [game.objectId]);
+
+  const getLegacyArtifacts = useCallback(async () => {
+    try {
+      const artifacts = await api
+        .get<GameArtifact[]>(
+          `profile/games/artifacts?objectId=${game.objectId}&shop=steam`
+        )
+        .json();
+
+      setArtifacts(artifacts);
+    } catch (error: unknown) {
+      console.error("Failed to load legacy backups", error);
+      setArtifacts([]);
+    }
   }, [game.objectId]);
 
   useEffect(() => {
-    getArtifacts();
-  }, [getArtifacts]);
+    getSnapshot();
+    getLegacyArtifacts();
+  }, [getSnapshot, getLegacyArtifacts]);
 
-  const createNewBackup = useCallback(async () => {
-    if (game.automaticCloudSync && auth && hasActiveSubscription) {
-      setIsCreatingBackup(true);
+  const restore = useCallback(async () => {
+    if (!auth || !hasActiveSubscription) return;
 
-      try {
-        await backupAndUpload(
-          game.objectId,
-          game.winePrefixPath,
-          auth.accessToken,
-          `Decky Backup from ${formatDate(new Date())}`
-        );
+    setIsRestoring(true);
+    engagePlayBlock(game.objectId);
 
-        toaster.toast({
-          title: "Backup and upload successful",
-          body: "The game has been backed up and uploaded to the cloud",
-          logo: composeToastLogo(game.iconUrl),
-        });
+    toaster.toast({
+      title: "Restoring cloud save...",
+      body: "Downloading and installing your save",
+    });
 
-        getArtifacts();
-      } catch (error: unknown) {
-        console.error(error);
+    try {
+      const result = await trackBusy(
+        game.objectId,
+        "restore",
+        () => restoreCloudSave(auth, game.objectId, game.shop, game.winePrefixPath)
+      );
 
-        toaster.toast({
-          title: "Failed to create backup",
-          body: "Please check if all game files are correct",
-        });
-      } finally {
-        setIsCreatingBackup(false);
+      if (result.auth) setAuth(result.auth);
+
+      if (result.skippedFiles.length === 0) {
+        setHasConflict(false);
+        useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
+        invalidatePrePlayCache(game.objectId);
       }
+
+      const skippedNote = result.skippedFiles.length
+        ? ` (${result.skippedFiles.length} files skipped)`
+        : "";
+
+      toaster.toast({
+        title: "Cloud save restored",
+        body: `Restored ${result.restoredFiles} files${skippedNote}`,
+        logo: composeToastLogo(game.iconUrl),
+      });
+    } catch (error: unknown) {
+      console.error(error);
+
+      toaster.toast({
+        title: "Failed to restore cloud save",
+        body: error instanceof Error ? error.message : "Unknown error",
+      });
+    } finally {
+      disengagePlayBlock(game.objectId);
+      setIsRestoring(false);
     }
   }, [
     auth,
-    game.automaticCloudSync,
-    game.objectId,
-    game.winePrefixPath,
     hasActiveSubscription,
-    formatDate,
+    game.objectId,
+    game.shop,
+    game.winePrefixPath,
     game.iconUrl,
-    getArtifacts,
+    setAuth,
   ]);
 
+  const confirmForceSync = useCallback((retry: () => void) => {
+    showSingleModal(
+      <ConfirmModal
+        strTitle="Overwrite Newer Cloud Save?"
+        strDescription="A newer cloud save exists for this game. Syncing now will overwrite it with your local save."
+        strOKButtonText="Sync Anyway"
+        strCancelButtonText="Cancel"
+        onOK={retry}
+        onCancel={() => disengagePlayBlock(game.objectId)}
+      />
+    );
+  }, [game.objectId]);
+
+  const runSync = useCallback(
+    async (
+      force: boolean,
+      resolutions?: Record<string, "local" | "remote">
+    ) => {
+      if (!auth || !hasActiveSubscription) return;
+
+      setIsSyncing(true);
+      engagePlayBlock(game.objectId);
+
+      try {
+        const result = await trackBusy(
+          game.objectId,
+          "sync",
+          () =>
+            syncCloudSave(
+              auth,
+              game.objectId,
+              game.shop,
+              game.winePrefixPath,
+              force,
+              resolutions ?? null
+            )
+        );
+
+        if (result.auth) setAuth(result.auth);
+
+        if (!result.ok && result.conflict) {
+          setIsSyncing(false);
+          useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+          setHasConflict(true);
+          return;
+        }
+
+        setHasConflict(false);
+        useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
+        invalidatePrePlayCache(game.objectId);
+        disengagePlayBlock(game.objectId);
+
+        toaster.toast({
+          title: "Cloud save synced",
+          body: `Uploaded ${result.uploadedFiles} files (${result.skippedFiles} already in the cloud)`,
+          logo: composeToastLogo(game.iconUrl),
+        });
+
+        getSnapshot();
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message.includes("remote-newer")) {
+          setIsSyncing(false);
+          confirmForceSync(() => runSync(true));
+          return;
+        }
+
+        console.error(error);
+        disengagePlayBlock(game.objectId);
+
+        toaster.toast({
+          title: "Failed to sync cloud save",
+          body: error instanceof Error ? error.message : "Unknown error",
+        });
+      } finally {
+        setIsSyncing(false);
+      }
+    },
+    [
+      auth,
+      hasActiveSubscription,
+      game.objectId,
+      game.shop,
+      game.winePrefixPath,
+      game.iconUrl,
+      setAuth,
+      getSnapshot,
+      confirmForceSync,
+    ]
+  );
+
+  const syncNow = useCallback(() => runSync(false), [runSync]);
+
+  const confirmRestore = useCallback(() => {
+    showSingleModal(
+      <ConfirmModal
+        strTitle="Confirm Cloud Save Restore"
+        strDescription="Are you sure you want to restore this cloud save? This will replace your current local save files."
+        strOKButtonText="Restore"
+        strCancelButtonText="Cancel"
+        onOK={restore}
+      />
+    );
+  }, [restore]);
+
   return (
+    <>
     <PanelSection title="Cloud Saves">
       <div className="game-cloud-saves__header">
         <div className="game-cloud-saves__details">
@@ -111,48 +277,122 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
 
         {isGameRunning && (
           <span className="game-cloud-saves__warning">
-            This game is currently in session. To restore a backup, please close
-            the game beforehand.
+            This game is currently in session. To sync or restore a cloud save,
+            please close the game beforehand.
           </span>
         )}
 
         <span className="game-cloud-saves__info">
-          Press any of the backups below to replace your current save.
+          {snapshotState === "loading" && "Loading cloud save info..."}
+          {snapshotState === "error" &&
+            "Could not load cloud save info. Check your connection."}
+          {snapshotState === "ready" &&
+            (snapshot
+              ? `Version ${snapshot.version} - ${snapshot.fileCount} files - ${formatBytes(snapshot.totalSizeBytes)} - ${formatDateTime(snapshot.updatedAt)}`
+              : "No cloud save snapshot found for this game yet.")}
         </span>
+
+        {snapshotState === "error" && (
+          <Button className="cloud-save" onClick={getSnapshot}>
+            Retry
+          </Button>
+        )}
+
+        {isRemoteNewer && (
+          <span className="game-cloud-saves__warning">
+            A newer cloud save exists on another device. Restoring is
+            recommended; syncing now will overwrite the cloud version.
+          </span>
+        )}
+
+        {hasConflict && (
+          <span className="game-cloud-saves__warning">
+            Both this device and the cloud changed the same save files.
+            Everything else merges automatically; choose the side to keep.
+          </span>
+        )}
+
+        {!canSync && (
+          <span className="game-cloud-saves__info">
+            Cloud saves require an active Hydra Cloud subscription.
+          </span>
+        )}
       </div>
 
       <div className="game-cloud-saves__cloud-saves">
         <Button
           className="game-cloud-saves__new-backup"
-          onClick={createNewBackup}
-          disabled={isGameRunning}
+          onClick={syncNow}
+          disabled={isGameRunning || !canSync || isSyncing || isRestoring}
         >
-          {isCreatingBackup ? (
+          {isSyncing ? (
             <>
               <Spinner width={15} />
-              Creating backup...
+              Syncing...
             </>
           ) : (
             <>
               <CloudIcon />
-              New Backup
+              Sync Now
             </>
           )}
         </Button>
 
-        {artifacts.map((artifact) => (
-          <GameCloudSave
-            artifact={artifact}
-            game={game}
-            isGameRunning={isGameRunning}
-          />
-        ))}
-      </div>
+        <Button
+          className="cloud-save"
+          onClick={confirmRestore}
+          disabled={
+            isGameRunning || !canSync || !snapshot || isSyncing || isRestoring
+          }
+        >
+          {isRestoring ? (
+            <>
+              <Spinner width={15} />
+              Restoring...
+            </>
+          ) : (
+            "Restore Cloud Save"
+          )}
+        </Button>
 
-      <span className="game-cloud-saves__used-slots">
-        {artifacts.length}/{user?.quirks.backupsPerGameLimit ?? 4} save slots
-        used
-      </span>
+        {hasConflict && (
+          <>
+            <Button
+              className="cloud-save"
+              onClick={() => runSync(true)}
+              disabled={isGameRunning || !canSync || isSyncing || isRestoring}
+            >
+              Keep Local
+            </Button>
+
+            <Button
+              className="cloud-save"
+              onClick={restore}
+              disabled={isGameRunning || !canSync || isSyncing || isRestoring}
+            >
+              Keep Cloud
+            </Button>
+          </>
+        )}
+      </div>
     </PanelSection>
+
+      {artifacts.length > 0 && (
+        <PanelSection title="Legacy Backups (read-only)">
+          <span className="game-cloud-saves__info">
+            Backups created with the old system. They can only be restored, not
+            replaced.
+          </span>
+
+          {artifacts.map((artifact) => (
+            <GameCloudSave
+              key={artifact.id}
+              artifact={artifact}
+              game={game}
+            />
+          ))}
+        </PanelSection>
+      )}
+    </>
   );
 }

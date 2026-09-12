@@ -6,10 +6,13 @@ import { isHydraLauncherRunning } from "../events";
 
 export class WSClient {
   private static ws: WebSocket | null = null;
-  private static reconnectInterval = 1_000;
+  private static readonly initialReconnectInterval = 1_000;
+  private static reconnectInterval = WSClient.initialReconnectInterval;
   private static readonly maxReconnectInterval = 30_000;
+  private static readonly reconnectBackoffMultiplier = 2;
   private static shouldReconnect = true;
   private static reconnecting = false;
+  private static reconnectTimer: number | null = null;
   private static heartbeatInterval: number | null = null;
 
   static async connect() {
@@ -25,7 +28,7 @@ export class WSClient {
 
       this.ws.onopen = () => {
         console.info("WS connected");
-        this.reconnectInterval = 1000;
+        this.reconnectInterval = WSClient.initialReconnectInterval;
         this.reconnecting = false;
         this.startHeartbeat();
       };
@@ -85,25 +88,31 @@ export class WSClient {
     }
   }
 
-  private static async tryReconnect() {
+  private static tryReconnect() {
     if (this.reconnecting) return;
     this.reconnecting = true;
 
     console.info(`Reconnecting in ${this.reconnectInterval / 1000}s...`);
 
-    setTimeout(async () => {
-      try {
-        await this.connect();
-      } catch (err) {
-        console.error("Reconnect failed:", err);
-        this.reconnectInterval = Math.min(
-          this.reconnectInterval * 2,
-          this.maxReconnectInterval
-        );
-        this.reconnecting = false;
-        this.tryReconnect();
-      }
-    }, this.reconnectInterval);
+    const delay = this.reconnectInterval;
+    this.reconnectInterval = Math.min(
+      this.reconnectInterval * WSClient.reconnectBackoffMultiplier,
+      this.maxReconnectInterval
+    );
+
+    this.clearReconnectTimer();
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnecting = false;
+      this.connect();
+    }, delay);
+  }
+
+  private static clearReconnectTimer() {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
   private static cleanupSocket() {
@@ -121,6 +130,7 @@ export class WSClient {
   public static close() {
     this.shouldReconnect = false;
     this.reconnecting = false;
+    this.clearReconnectTimer();
     this.cleanupSocket();
   }
 

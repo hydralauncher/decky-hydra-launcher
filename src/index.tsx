@@ -5,6 +5,7 @@ import { AppLifetimeNotification } from "@decky/ui/dist/globals/steam-client/Gam
 import styles from "./styles/globals.scss";
 import {
   useAuthStore,
+  useCloudSaveGuard,
   useCurrentGame,
   useLibraryStore,
   useNavigationStore,
@@ -14,12 +15,31 @@ import { api } from "./hydra-api";
 import { Home } from "./home";
 import { WSClient } from "./ws";
 import { composeToastLogo } from "./helpers";
+import { PiCloudArrowUp } from "react-icons/pi";
 import { GameCloudSaves } from "./game-cloud-saves";
 import { AuthGuide } from "./auth-guide";
-import { backupAndUpload, getLibrary, isHydraLauncherRunning } from "./events";
-import { getAuth } from "./events";
+import {
+  checkCloudSaveStatus,
+  getAuth,
+  getLibrary,
+  isHydraLauncherRunning,
+  logEvent,
+  syncCloudSave,
+} from "./events";
+import {
+  invalidatePrePlayCache,
+  registerPrePlaySync,
+  trackBusy,
+  unregisterPrePlaySync,
+  waitForBusy,
+} from "./pre-play-sync";
+import {
+  disengagePlayBlock,
+  engagePlayBlock,
+  registerPlayBlock,
+  unregisterPlayBlock,
+} from "./play-block";
 import { HydraLogo } from "./components";
-import { formatDate } from "./hooks";
 import type { Game, User } from "./api-types";
 
 function Plugin() {
@@ -45,7 +65,7 @@ function Plugin() {
       case "auth-guide":
         return <AuthGuide />;
       case "game":
-        return <GameCloudSaves game={route.params.game as Game} />;
+        return <GameCloudSaves key={(route.params.game as Game).objectId} game={route.params.game as Game} />;
       case "home":
         return <Home />;
       default:
@@ -64,6 +84,8 @@ function Plugin() {
 
 let updateInterval: NodeJS.Timeout;
 let lastTick: Date;
+
+const pendingStatusChecks = new Map<string, Promise<void>>();
 
 const onAppLifetimeNotification = async (
   notification: AppLifetimeNotification
@@ -91,10 +113,22 @@ const onAppLifetimeNotification = async (
   const unAppID = notification.unAppID.toString();
 
   const game = library.find((game) => {
-    return game.objectId === unAppID || game.winePrefixPath?.includes(unAppID);
+    return (
+      game.objectId === unAppID ||
+      String(game.steamShortcutAppId ?? "") === unAppID ||
+      game.winePrefixPath?.split("/").includes(unAppID)
+    );
   });
 
+  logEvent(
+    `app lifetime: unAppID=${unAppID} running=${notification.bRunning} match=${game ? game.objectId : "none"}`
+  );
+
   if (game) {
+    logEvent(
+      `app ${notification.bRunning ? "launch" : "exit"}: ${game.title} (${game.objectId})`
+    );
+
     if (notification.bRunning) {
       const startedAt = new Date();
       lastTick = startedAt;
@@ -102,6 +136,56 @@ const onAppLifetimeNotification = async (
       setObjectId(game.objectId);
       setRemoteId(game.remoteId);
       setStartedAt(startedAt);
+
+      disengagePlayBlock(game.objectId);
+
+      const alreadyFlagged = useCloudSaveGuard
+        .getState()
+        .remoteNewerGames.includes(game.objectId);
+
+      if (game.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
+        await waitForBusy(game.objectId);
+
+        const check = checkCloudSaveStatus(auth, game.objectId, game.shop, game.winePrefixPath)
+          .then((status) => {
+            if (status.auth) {
+              useAuthStore.getState().setAuth(status.auth);
+            }
+            if (status.remoteNewer) {
+              useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+              logEvent(`guard flagged: ${game.objectId} (remote v${status.remoteVersion}, local v${status.localVersion ?? "none"})`);
+              if (useCurrentGame.getState().objectId === game.objectId) {
+                toaster.toast({
+                  title: "Newer cloud save available",
+                  body: `${game.title}: newer save in the cloud. This session won't sync — restore it in Hydra.`,
+                  logo: composeToastLogo(game.iconUrl),
+                });
+              }
+            } else {
+              useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
+              logEvent(`guard clear: ${game.objectId} (remote v${status.remoteVersion})`);
+            }
+          })
+          .catch((err) => {
+            console.error("Failed to check cloud save status", err);
+            const message = err instanceof Error ? err.message : "unknown";
+            logEvent(`launch status failed: ${game.objectId}: ${message}`);
+            if (message.includes("remote-newer")) {
+              useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+            }
+            toaster.toast({
+              title: "Cloud save status unknown",
+              body: `Couldn't check ${game.title}. Exit sync still runs at close.`,
+            });
+          })
+          .finally(() => {
+            if (pendingStatusChecks.get(game.objectId) === check) {
+              pendingStatusChecks.delete(game.objectId);
+            }
+          });
+
+        pendingStatusChecks.set(game.objectId, check);
+      }
 
       console.log("Started at", startedAt);
 
@@ -143,25 +227,99 @@ const onAppLifetimeNotification = async (
 
     const isHydraRunning = await isHydraLauncherRunning();
 
-    // Check if there's any chance for the accessToken to be expired
+    await pendingStatusChecks.get(game.objectId)?.catch(() => {});
+    await waitForBusy(game.objectId);
+
+    invalidatePrePlayCache(game.objectId);
+
+    const remoteNewer = useCloudSaveGuard
+      .getState()
+      .remoteNewerGames.includes(game.objectId);
+
+    if (remoteNewer) {
+      logEvent(`auto-sync skipped: remote newer (${game.objectId})`);
+      toaster.toast({
+        title: "Cloud sync skipped",
+        body: `${game.title}: newer save in the cloud. Restore in Hydra, or sync to overwrite it.`,
+          logo: composeToastLogo(game.iconUrl),
+        });
+      return;
+    }
+
+    const freshAuth = useAuthStore.getState().auth;
+    const freshSubscription = useUserStore.getState().hasActiveSubscription;
+
     if (
       game.automaticCloudSync &&
-      auth &&
-      hasActiveSubscription &&
+      freshAuth &&
+      freshSubscription &&
       !isHydraRunning
     ) {
-      await backupAndUpload(
-        game.objectId,
-        game.winePrefixPath,
-        auth.accessToken,
-        `Automatic Decky Backup from ${formatDate(new Date(), "en")}`
-      );
+      try {
+        logEvent(`auto-sync start: ${game.objectId}`);
+        engagePlayBlock(game.objectId);
+        const result = await trackBusy(game.objectId, "sync", () =>
+          syncCloudSave(
+            freshAuth,
+            game.objectId,
+            game.shop,
+            game.winePrefixPath,
+            false,
+            null
+          )
+        );
 
-      toaster.toast({
-        title: "Backup and upload successful",
-        body: "The game has been backed up and uploaded to the cloud",
-        logo: composeToastLogo(game.iconUrl),
-      });
+        if (result.auth) {
+          useAuthStore.getState().setAuth(result.auth);
+        }
+
+        if (!result.ok && result.conflict) {
+          useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+          disengagePlayBlock(game.objectId);
+          toaster.toast({
+            title: "Cloud save conflict",
+            body: `${game.title}: changed on both sides. Choose which to keep in Hydra.`,
+            logo: composeToastLogo(game.iconUrl),
+          });
+          return;
+        }
+
+        toaster.toast({
+          title: "Cloud save synced",
+          body: `${game.title}: save uploaded to the cloud`,
+          logo: composeToastLogo(game.iconUrl),
+          icon: <PiCloudArrowUp size={20} />,
+        });
+        logEvent(`auto-sync done: ${game.objectId} v${result.version}`);
+        disengagePlayBlock(game.objectId);
+      } catch (error: unknown) {
+        console.error("Failed to sync cloud save", error);
+        logEvent(`auto-sync failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
+
+        if (!useCloudSaveGuard.getState().remoteNewerGames.includes(game.objectId)) {
+          disengagePlayBlock(game.objectId);
+        }
+
+        if (error instanceof Error && error.message.includes("remote-newer")) {
+          useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+          disengagePlayBlock(game.objectId);
+          toaster.toast({
+            title: "Cloud sync skipped",
+            body: `${game.title}: newer save in the cloud. Restore in Hydra, or sync to overwrite it.`,
+            logo: composeToastLogo(game.iconUrl),
+          });
+          return;
+        }
+
+        toaster.toast({
+          title: "Failed to sync cloud save",
+          body: error instanceof Error ? error.message : "Unknown error",
+        });
+      }
+    } else {
+      logEvent(
+        `auto-sync skipped: ${game.objectId} (autoSync=${game.automaticCloudSync} auth=${Boolean(freshAuth)} sub=${Boolean(freshSubscription)} hydraRunning=${isHydraRunning})`
+      );
     }
   }
 };
@@ -172,8 +330,15 @@ export default definePlugin(() => {
   const { setLibrary } = useLibraryStore.getState();
   const { setRoute } = useNavigationStore.getState();
 
+  registerPrePlaySync();
+  registerPlayBlock();
+
   getAuth()
     .then((auth) => {
+      if (!auth) {
+        throw new Error("no auth");
+      }
+
       setAuth(auth);
 
       setRoute({
@@ -188,7 +353,13 @@ export default definePlugin(() => {
           setUser(user);
         });
 
-      getLibrary().then((library) => setLibrary(library));
+      getLibrary().then((library) => {
+        setLibrary(library);
+        const withIds = library.filter(
+          (game) => game.steamShortcutAppId != null
+        ).length;
+        logEvent(`library shortcut ids: ${withIds}/${library.length} games`);
+      });
 
       WSClient.connect();
     })
@@ -210,6 +381,8 @@ export default definePlugin(() => {
     content: <Plugin />,
     icon: <HydraLogo />,
     onDismount() {
+      unregisterPrePlaySync();
+      unregisterPlayBlock();
       removeGameExecutionListener();
 
       if (updateInterval) {
