@@ -10,11 +10,9 @@ rusty-leveldb = "*"
 dirs = "4.0"
 fs_extra = "*"
 tempfile = "*"
-serde_yaml = "*"
 tokio = { version = "1", features = ["full"] }
 regex = "*"
 anyhow = "*"
-tar = "0.4"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 hostname = "0.3"
 sha2 = "0.10"

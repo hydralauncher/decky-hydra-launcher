@@ -10,6 +10,7 @@ export class WSClient {
   private static readonly maxReconnectInterval = 30_000;
   private static shouldReconnect = true;
   private static reconnecting = false;
+  private static reconnectTimer: number | null = null;
   private static heartbeatInterval: number | null = null;
 
   static async connect() {
@@ -97,10 +98,19 @@ export class WSClient {
       this.maxReconnectInterval
     );
 
-    setTimeout(() => {
+    this.clearReconnectTimer();
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
       this.reconnecting = false;
       this.connect();
     }, delay);
+  }
+
+  private static clearReconnectTimer() {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
 
   private static cleanupSocket() {
@@ -118,6 +128,7 @@ export class WSClient {
   public static close() {
     this.shouldReconnect = false;
     this.reconnecting = false;
+    this.clearReconnectTimer();
     this.cleanupSocket();
   }
 
