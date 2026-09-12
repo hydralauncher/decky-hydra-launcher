@@ -4,13 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use tempfile::TempDir;
 
-use std::fs;
-
 use std::fs::File;
 
 use std::path::PathBuf;
-
-use tar::Archive;
 
 use std::io::Write;
 
@@ -18,37 +14,11 @@ use reqwest::Client;
 
 use std::collections::HashMap;
 
-use crate::wine::{add_wine_prefix_to_windows_path, get_windows_like_user_profile_path, transform_ludusavi_backup_path_into_windows_path};
-
 struct Snapshot {
 
     db: DB,
 
     _temp_dir: TempDir,
-
-}
-
-#[derive(Debug, Deserialize)]
-
-pub struct BackupManifest {
-
-    pub drives: HashMap<String, String>,
-
-    pub backups: Vec<LudusaviBackup>,
-
-}
-
-#[derive(Debug, Deserialize)]
-
-pub struct LudusaviBackup {
-
-    pub files: HashMap<String, FileMetadata>,
-
-}
-
-#[derive(Debug, Deserialize)]
-
-pub struct FileMetadata {
 
 }
 
@@ -1611,178 +1581,77 @@ pub fn get_library() -> String {
 
 }
 
-fn restore_ludusavi_backup(
 
-    backup_path: PathBuf,
-
-    title: &str,
-
-    home_dir: &str,
-
-    wine_prefix_path: Option<&str>,
-
-    artifact_wine_prefix_path: Option<String>,
-
-) -> std::io::Result<()> {
-
-    let game_backup_path = backup_path.join(title);
-
-    let mapping_yaml_path = game_backup_path.join("mapping.yaml");
-
-    let data = fs::read_to_string(&mapping_yaml_path)?;
-
-    let manifest: BackupManifest = serde_yaml::from_str(&data)
-
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-    let user_profile_path = get_windows_like_user_profile_path(wine_prefix_path.unwrap_or(""))
-
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
-
-    for backup in manifest.backups {
-
-        for key in backup.files.keys() {
-
-            let mut source_path_with_drives = key.clone();
-
-            for (drive_key, drive_value) in &manifest.drives {
-
-                source_path_with_drives = source_path_with_drives.replacen(drive_value, drive_key, 1);
-
-            }
-
-            let source_path = game_backup_path.join(&source_path_with_drives);
-
-            let public_path = "C:/users/Public";
-
-            let destination_path = transform_ludusavi_backup_path_into_windows_path(key, artifact_wine_prefix_path.clone())
-
-                .replacen(
-
-                    home_dir,
-
-                    &add_wine_prefix_to_windows_path(&user_profile_path, wine_prefix_path),
-
-                    1,
-
-                )
-
-                .replacen(
-
-                    &public_path,
-
-                    &add_wine_prefix_to_windows_path(&public_path, wine_prefix_path),
-
-                    1,
-
-                );
-
-            let destination_path = PathBuf::from(destination_path);
-
-            println!("Moving {} to {}", source_path.display(), destination_path.display());
-
-            if let Some(parent) = destination_path.parent() {
-
-                fs::create_dir_all(parent)?;
-
-            }
-
-            if destination_path.exists() {
-
-                fs::remove_file(&destination_path)?;
-
-            }
-
-            fs::rename(source_path, destination_path)?;
-
-        }
-
+pub fn sanitize_legacy_save_archive_name(value: &str) -> String {
+    let without_controls: String = value
+        .chars()
+        .map(|c| if (c as u32) < 32 { '_' } else { c })
+        .collect();
+    let mut sanitized = without_controls.trim().replace(
+        ['<', '>', ':', '"', '/', '\\', '|', '?', '*']
+            .as_slice(),
+        "_",
+    );
+    if sanitized.len() >= 4 && sanitized[sanitized.len() - 4..].eq_ignore_ascii_case(".zip") {
+        sanitized.truncate(sanitized.len() - 4);
     }
-
-    Ok(())
-
+    sanitized = sanitized.trim_end_matches(['.', ' ']).to_string();
+    if sanitized.is_empty() {
+        sanitized = "legacy-save".to_string();
+    }
+    let lower = sanitized.to_lowercase();
+    let bare = lower.split('.').next().unwrap_or("");
+    let reserved = bare == "con"
+        || bare == "prn"
+        || bare == "aux"
+        || bare == "nul"
+        || (bare.len() == 4
+            && (bare.starts_with("com") || bare.starts_with("lpt"))
+            && bare[3..4].chars().all(|c| ('1'..='9').contains(&c)));
+    if reserved {
+        sanitized = format!("_{sanitized}");
+    }
+    sanitized
 }
 
-pub async fn download_game_artifact(
+fn unique_archive_path(dir: &std::path::Path, stem: &str) -> PathBuf {
+    let candidate = dir.join(format!("{stem}.zip"));
+    if !candidate.exists() {
+        return candidate;
+    }
+    let mut index = 1u32;
+    loop {
+        let candidate = dir.join(format!("{stem} ({index}).zip"));
+        if !candidate.exists() {
+            return candidate;
+        }
+        index += 1;
+    }
+}
 
-    object_id: &str,
-
-    shop: &str,
-
+pub async fn export_game_artifact(
     download_url: &str,
-
-    object_key: &str,
-
-    home_dir: &str,
-
-    wine_prefix_path: Option<&str>,
-
-    artifact_wine_prefix_path: Option<String>,
-
-) -> Result<(), Box<dyn std::error::Error>> {
-
-    let backups_path = dirs::config_dir()
-
-        .ok_or("No config dir")?
-
-        .join("hydralauncher")
-
-        .join("Backups");
-
-    fs::create_dir_all(&backups_path)?;
-
-    let zip_location = backups_path.join(object_key);
-
-    let backup_path = backups_path.join(format!("{}-{}", shop, object_id));
-
-    if backup_path.exists() {
-
-        fs::remove_dir_all(&backup_path)?;
-
-    }
-
+    filename: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     if !download_url.starts_with("https://") {
-
         return Err("Refusing non-HTTPS download URL".into());
-
     }
-
-    let client = Client::new();
-
+    let home = dirs::home_dir().ok_or("No home directory")?;
+    let downloads = home.join("Downloads");
+    std::fs::create_dir_all(&downloads)?;
+    let stem = sanitize_legacy_save_archive_name(filename);
+    let destination = unique_archive_path(&downloads, &stem);
+    let client = Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(3600))
+        .build()
+        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let mut response = client.get(download_url).send().await?;
-
-    let mut file = File::create(&zip_location)?;
-
+    let mut file = File::create(&destination)?;
     while let Some(chunk) = response.chunk().await? {
-
         file.write_all(&chunk)?;
-
     }
-
-    fs::create_dir_all(&backup_path)?;
-
-    let archive_file = File::open(&zip_location)?;
-
-    let mut archive = Archive::new(archive_file);
-
-    archive.unpack(&backup_path)?;
-
-    restore_ludusavi_backup(
-
-        backup_path,
-
-        object_id,
-
-        home_dir,
-
-        wine_prefix_path,
-
-        artifact_wine_prefix_path,
-
-    )?;
-
-    Ok(())
-
+    Ok(destination.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
@@ -2187,6 +2056,37 @@ mod shortcut_tests {
         let payload = anchor_record_payload(&record);
         assert!(payload.starts_with(r#"{"schemaVersion":4,"environmentId":"env","baseSnapshotId":"snap","baseVersion":2,"baseAggregateHash":"h","entries":[{"variantId":"v","rawPath":"a","relativePath":"x","hash":""#));
         assert!(payload.contains(r#""unresolvedRemoteEntryIds":[],"updatedAt":""#));
+    }
+
+    #[test]
+    fn sanitize_legacy_save_archive_name_matches_launcher() {
+        assert_eq!(sanitize_legacy_save_archive_name("My Save"), "My Save");
+        assert_eq!(sanitize_legacy_save_archive_name("a<b>c:d\"e/f\\g|h?i*j"), "a_b_c_d_e_f_g_h_i_j");
+        assert_eq!(sanitize_legacy_save_archive_name("backup.zip"), "backup");
+        assert_eq!(sanitize_legacy_save_archive_name("backup.ZIP"), "backup");
+        assert_eq!(sanitize_legacy_save_archive_name("trailing. . "), "trailing");
+        assert_eq!(sanitize_legacy_save_archive_name("   "), "legacy-save");
+        assert_eq!(sanitize_legacy_save_archive_name("con"), "_con");
+        assert_eq!(sanitize_legacy_save_archive_name("COM1"), "_COM1");
+        assert_eq!(sanitize_legacy_save_archive_name("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize_legacy_save_archive_name("lpt9"), "_lpt9");
+        assert_eq!(sanitize_legacy_save_archive_name("console"), "console");
+    }
+
+    #[test]
+    fn unique_archive_path_avoids_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = unique_archive_path(dir.path(), "save");
+        assert_eq!(first.file_name().unwrap(), "save.zip");
+        std::fs::write(&first, "x").unwrap();
+        let second = unique_archive_path(dir.path(), "save");
+        assert_eq!(second.file_name().unwrap(), "save (1).zip");
+    }
+
+    #[tokio::test]
+    async fn export_game_artifact_refuses_plain_http() {
+        let result = export_game_artifact("http://example.com/a.zip", "save").await;
+        assert!(result.is_err());
     }
 
 }

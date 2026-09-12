@@ -13,10 +13,10 @@ export const getLibrary = callable<[], Game[]>("get_library");
 export const isHydraLauncherRunning = callable<[], boolean>(
   "is_hydra_launcher_running"
 );
-export const downloadGameArtifact = callable<
-  [string, string, string, string, string, string | null],
-  void
->("download_game_artifact");
+export const exportGameArtifact = callable<
+  [string, string],
+  { path: string }
+>("export_game_artifact");
 export const syncCloudSave = callable<
   [Auth, string, string, string | null, boolean, Record<string, "local" | "remote"> | null],
   CloudSaveSyncResult

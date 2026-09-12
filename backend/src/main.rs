@@ -1,4 +1,4 @@
-use hydra::{get_auth, get_library, download_game_artifact, resolve_shortcut_app_id};
+use hydra::{get_auth, get_library, export_game_artifact, resolve_shortcut_app_id};
 
 mod cloud_save;
 
@@ -72,29 +72,25 @@ async fn main() {
 
         }
 
-        "download-game-artifact" => {
+        "export-game-artifact" => {
 
-            let object_id = arg(2, "object id");
+            let download_url = arg(2, "download url");
 
-            let download_url = arg(3, "download url");
+            let filename = arg(3, "file name");
 
-            let object_key = arg(4, "object key");
+            match export_game_artifact(&download_url, &filename).await {
 
-            let home_dir = arg(5, "home dir");
+                Ok(path) => println!("{}", serde_json::json!({ "ok": true, "path": path })),
 
-            let wine_prefix = arg(6, "wine prefix");
+                Err(err) => {
 
-            let artifact_wine_prefix = std::env::args().nth(7);
+                    println!("{}", serde_json::json!({ "ok": false, "error": format!("{err:#}") }));
 
-            if let Err(err) = download_game_artifact(&object_id, "steam", &download_url, &object_key, &home_dir, Some(&wine_prefix), artifact_wine_prefix).await {
+                    std::process::exit(1);
 
-                println!("{}", serde_json::json!({ "ok": false, "error": format!("{err:#}") }));
-
-                std::process::exit(1);
+                }
 
             }
-
-            println!("{}", serde_json::json!({ "ok": true }));
 
         }
 

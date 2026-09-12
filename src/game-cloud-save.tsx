@@ -3,8 +3,7 @@ import { useCallback } from "react";
 import { Button, ConfirmModal, showModal } from "@decky/ui";
 import { useDate } from "./hooks";
 import { api } from "./hydra-api";
-import { downloadGameArtifact } from "./events";
-import { useCloudSaveGuard } from "./stores";
+import { exportGameArtifact } from "./events";
 import type { Game, GameArtifact } from "./api-types";
 import { toaster } from "@decky/api";
 import { composeToastLogo, formatBytes } from "./helpers";
@@ -22,15 +21,7 @@ export function GameCloudSave({
 }: GameCloudSaveProps) {
   const { formatDate, formatDateTime } = useDate();
 
-  const downloadArtifact = useCallback(async () => {
-    if (!game.winePrefixPath) {
-      toaster.toast({
-        title: "Cannot restore backup",
-        body: "This game has no Wine prefix configured",
-      });
-      return;
-    }
-
+  const exportArtifact = useCallback(async () => {
     toaster.toast({
       title: "Downloading backup...",
       body: "Please wait while we download the backup",
@@ -46,20 +37,14 @@ export function GameCloudSave({
         }>(`profile/games/artifacts/${artifact.id}/download`)
         .json();
 
-      await downloadGameArtifact(
-        game.objectId,
+      const result = await exportGameArtifact(
         response.downloadUrl,
-        response.objectKey,
-        response.homeDir,
-        game.winePrefixPath,
-        response.winePrefixPath
+        artifact.label ?? `Backup from ${formatDate(artifact.createdAt)}`
       );
 
-      useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
-
       toaster.toast({
-        title: "Backup restored",
-        body: "The game backup has been restored",
+        title: "Backup downloaded",
+        body: result.path,
         logo: composeToastLogo(game.iconUrl),
       });
     } catch (error: unknown) {
@@ -70,19 +55,19 @@ export function GameCloudSave({
         body: "Please check if all game files are correct",
       });
     }
-  }, [artifact, game.iconUrl, game.objectId, game.winePrefixPath]);
+  }, [artifact, formatDate, game.iconUrl]);
 
   const confirmArtifactDownload = useCallback(() => {
     showModal(
       <ConfirmModal
-        strTitle="Confirm Backup Installation"
-        strDescription="Are you sure you want to install this backup? This will replace your current save."
-        strOKButtonText="Install"
+        strTitle="Confirm Backup Download"
+        strDescription="Download a zip copy of this backup to your Downloads folder?"
+        strOKButtonText="Download"
         strCancelButtonText="Cancel"
-        onOK={downloadArtifact}
+        onOK={exportArtifact}
       />
     );
-  }, [downloadArtifact]);
+  }, [exportArtifact]);
 
   return (
     <Button
