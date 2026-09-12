@@ -728,6 +728,45 @@ fn write_state_logged(shop: &str, object_id: &str, key: &str, state: &CloudSaveS
 
 }
 
+fn persist_sync_anchor(
+    shop: &str,
+    object_id: &str,
+    snapshot_id: &str,
+    version: u64,
+    aggregate_hash: &str,
+    files: &[crate::hydra::AnchorWriteEntry],
+    unresolved_nul_ids: &[String],
+) {
+    let Some(environment) = crate::environment::resolve_game_environment(shop, object_id) else {
+        eprintln!("sync anchor skipped: environment unavailable for {object_id}");
+        return;
+    };
+    if environment.mode != crate::environment::PrefixIdentityMode::Marker {
+        eprintln!("sync anchor degraded: no prefix marker for {object_id}");
+    }
+    let Some(user_id) = crate::hydra::current_user_id_from_store() else {
+        eprintln!("sync anchor skipped: no signed-in user");
+        return;
+    };
+    let Some(record) = crate::hydra::build_sync_anchor_record(
+        &environment.id,
+        snapshot_id,
+        version,
+        aggregate_hash,
+        files,
+        unresolved_nul_ids,
+        &crate::hydra::anchor_timestamp_now(),
+    ) else {
+        eprintln!("sync anchor skipped: invalid anchor payload for {object_id}");
+        return;
+    };
+    if let Err(err) =
+        crate::hydra::write_sync_anchor(shop, object_id, &user_id, &environment.id, &record)
+    {
+        eprintln!("sync anchor skipped for {object_id}: {err:#}");
+    }
+}
+
 #[derive(Debug, Deserialize)]
 
 #[serde(rename_all = "camelCase")]
@@ -1348,6 +1387,8 @@ pub async fn sync_cloud_save(
 
     let mut result: Option<(CommitSnapshotResponse, usize, usize, Vec<StateEntry>)> = None;
 
+    let mut pre_resolution: Vec<String> = Vec::new();
+
     for attempt in 0..2 {
 
         let discovered = match discover_files(object_id, shop, operative.as_deref()).await {
@@ -1450,10 +1491,13 @@ pub async fn sync_cloud_save(
 
                 };
 
+                let environment_id = crate::environment::resolve_game_environment(shop, object_id)
+                    .map(|environment| environment.id);
+
                 let anchor = crate::hydra::get_sync_anchor(
                     object_id,
                     shop,
-                    crate::hydra::prefix_environment_id(operative.as_deref()).as_deref(),
+                    environment_id.as_deref(),
                 );
 
                 let anchor_matches = anchor
@@ -1553,6 +1597,11 @@ pub async fn sync_cloud_save(
                     .map_err(|e| anyhow!("merge failed: {e}"))?;
 
                     if let Some(resolutions) = &resolutions {
+
+                        pre_resolution = outcome                            .conflicts
+                            .iter()
+                            .map(|c| c.identity.clone())
+                            .collect();
 
                         let mut remaining = Vec::new();
 
@@ -1913,6 +1962,25 @@ pub async fn sync_cloud_save(
                     })
 
                     .collect();
+
+                persist_sync_anchor(
+                    shop,
+                    object_id,
+                    &committed.snapshot_id,
+                    committed.version,
+                    &committed.aggregate_hash,
+                    &files
+                        .iter()
+                        .map(|f| crate::hydra::AnchorWriteEntry {
+                            variant_id: f.variant_id.clone(),
+                            raw_path: f.raw_path.clone(),
+                            relative_path: f.relative_path.clone(),
+                            hash: f.hash.clone(),
+                            size_bytes: f.size_bytes,
+                        })
+                        .collect::<Vec<_>>(),
+                    &pre_resolution,
+                );
 
                 result = Some((committed, uploaded_files, skipped_files, entries));
 
@@ -3249,6 +3317,8 @@ pub async fn restore_cloud_save(
 
     let mut restored_files = 0usize;
 
+    let mut written_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     let mut skipped_files: Vec<String> = Vec::new();
 
     eprintln!(
@@ -3266,6 +3336,16 @@ pub async fn restore_cloud_save(
         if current_files.contains(&index) {
 
             restored_files += 1;
+
+            written_keys.insert(crate::merge::identity_key(
+
+                &file.variant_id,
+
+                &file.raw_path,
+
+                &file.relative_path,
+
+            ));
 
             continue;
 
@@ -3371,7 +3451,21 @@ pub async fn restore_cloud_save(
 
         match result {
 
-            Ok(()) => restored_files += 1,
+            Ok(()) => {
+
+                restored_files += 1;
+
+                written_keys.insert(crate::merge::identity_key(
+
+                    &file.variant_id,
+
+                    &file.raw_path,
+
+                    &file.relative_path,
+
+                ));
+
+            }
 
             Err(err) => {
 
@@ -3444,6 +3538,37 @@ pub async fn restore_cloud_save(
         );
 
     }
+
+    persist_sync_anchor(
+        shop,
+        object_id,
+        &manifest.snapshot.id,
+        manifest.snapshot.version,
+        &latest.aggregate_hash,
+        &manifest
+            .files
+            .iter()
+            .map(|f| crate::hydra::AnchorWriteEntry {
+                variant_id: f.variant_id.clone(),
+                raw_path: f.raw_path.clone(),
+                relative_path: f.relative_path.clone(),
+                hash: f.hash.clone(),
+                size_bytes: f.size_bytes,
+            })
+            .collect::<Vec<_>>(),
+        &manifest
+            .files
+            .iter()
+            .filter(|f| {
+                !written_keys.contains(
+                    crate::merge::identity_key(&f.variant_id, &f.raw_path, &f.relative_path).as_str(),
+                )
+            })
+            .map(|f| {
+                crate::merge::identity_key(&f.variant_id, &f.raw_path, &f.relative_path)
+            })
+            .collect::<Vec<_>>(),
+    );
 
     Ok(RestoreResult {
 
@@ -3838,10 +3963,13 @@ pub async fn check_cloud_save_status(
 
         } else if let Some(remote) = latest {
 
+            let environment_id = crate::environment::resolve_game_environment(shop, object_id)
+                .map(|environment| environment.id);
+
             let anchors = crate::hydra::list_sync_anchors(
                 object_id,
                 shop,
-                crate::hydra::prefix_environment_id(operative.as_deref()).as_deref(),
+                environment_id.as_deref(),
             );
 
             let picked = anchors

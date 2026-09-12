@@ -206,6 +206,58 @@ pub fn get_game_executable_path(object_id: &str, shop: &str) -> Option<String> {
 
 }
 
+pub fn get_game_wine_prefix_path(object_id: &str, shop: &str) -> Option<String> {
+
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+
+        return None;
+
+    };
+
+    let key = format!("!games!{shop}:{object_id}");
+
+    let value = snapshot.db.get(key.as_bytes())?;
+
+    let _ = snapshot.db.close();
+
+    let game: serde_json::Value = serde_json::from_slice(&value).ok()?;
+
+    game.get("winePrefixPath")?.as_str().map(|s| s.to_string())
+
+}
+
+pub fn get_default_wine_prefix_override() -> Option<String> {
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+        return None;
+    };
+    let value = snapshot.db.get(b"userPreferences")?;
+    let _ = snapshot.db.close();
+    let preferences: serde_json::Value = serde_json::from_slice(&value).ok()?;
+    preferences
+        .get("defaultWinePrefixPath")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+pub fn read_generation_record(key: &str) -> Option<String> {
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+        return None;
+    };
+    let full = format!("!cloud-save-prefix-generations!{key}");
+    let value = snapshot.db.get(full.as_bytes())?;
+    let _ = snapshot.db.close();
+    String::from_utf8(value).ok()
+}
+
+pub fn current_user_id_from_store() -> Option<String> {
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+        return None;
+    };
+    let user_id = current_user_id(&mut snapshot);
+    let _ = snapshot.db.close();
+    user_id
+}
+
 #[derive(Debug, Clone, Serialize)]
 
 #[serde(rename_all = "camelCase")]
@@ -983,7 +1035,7 @@ pub struct AnchorRecord {
 
 }
 
-fn valid_environment_marker(value: &str) -> bool {
+pub(crate) fn valid_environment_marker(value: &str) -> bool {
 
     let marker = value.trim().to_lowercase();
 
@@ -1281,6 +1333,188 @@ pub fn get_sync_anchor(
 
         .map(|record| record.anchor)
 
+}
+
+pub const SYNC_ANCHOR_SCHEMA_VERSION: u32 = 4;
+
+const SYNC_ANCHORS_PREFIX: &str = "!cloud-save-sync-anchors!";
+
+#[derive(Debug, Clone)]
+pub struct AnchorWriteEntry {
+    pub variant_id: String,
+    pub raw_path: String,
+    pub relative_path: String,
+    pub hash: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnchorWriteRecord {
+    pub environment_id: String,
+    pub base_snapshot_id: String,
+    pub base_version: u64,
+    pub base_aggregate_hash: String,
+    pub entries: Vec<AnchorWriteEntry>,
+    pub unresolved_remote_entry_ids: Vec<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AnchorWritePayload {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+    #[serde(rename = "environmentId")]
+    environment_id: String,
+    #[serde(rename = "baseSnapshotId")]
+    base_snapshot_id: String,
+    #[serde(rename = "baseVersion")]
+    base_version: u64,
+    #[serde(rename = "baseAggregateHash")]
+    base_aggregate_hash: String,
+    entries: Vec<AnchorWriteEntryPayload>,
+    #[serde(rename = "unresolvedRemoteEntryIds")]
+    unresolved_remote_entry_ids: Vec<String>,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AnchorWriteEntryPayload {
+    #[serde(rename = "variantId")]
+    variant_id: String,
+    #[serde(rename = "rawPath")]
+    raw_path: String,
+    #[serde(rename = "relativePath")]
+    relative_path: String,
+    hash: String,
+    #[serde(rename = "sizeBytes")]
+    size_bytes: u64,
+}
+
+pub fn anchor_file_key(variant_id: &str, raw_path: &str, relative_path: &str) -> String {
+    serde_json::to_string(&(variant_id, raw_path, relative_path))
+        .unwrap_or_default()
+}
+
+fn utf16_order(left: &str, right: &str) -> std::cmp::Ordering {
+    left.encode_utf16().cmp(right.encode_utf16())
+}
+
+pub fn anchor_timestamp_now() -> String {
+    let now = chrono::Utc::now();
+    now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+pub fn build_sync_anchor_record(
+    environment_id: &str,
+    base_snapshot_id: &str,
+    base_version: u64,
+    base_aggregate_hash: &str,
+    files: &[AnchorWriteEntry],
+    unresolved_nul_ids: &[String],
+    updated_at: &str,
+) -> Option<AnchorWriteRecord> {
+    if base_version < 1 || base_snapshot_id.is_empty() || base_aggregate_hash.is_empty() {
+        return None;
+    }
+    let mut keyed: Vec<(String, &AnchorWriteEntry)> = files
+        .iter()
+        .map(|f| (anchor_file_key(&f.variant_id, &f.raw_path, &f.relative_path), f))
+        .collect();
+    keyed.sort_by(|a, b| utf16_order(&a.0, &b.0));
+    if keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return None;
+    }
+    let known: std::collections::HashSet<&str> = keyed.iter().map(|(key, _)| key.as_str()).collect();
+    let mut unresolved: Vec<String> = unresolved_nul_ids
+        .iter()
+        .filter_map(|id| {
+            let parts: Vec<&str> = id.split('\u{0}').collect();
+            if parts.len() != 3 {
+                return None;
+            }
+            let key = anchor_file_key(parts[0], parts[1], parts[2]);
+            known.contains(key.as_str()).then_some(key)
+        })
+        .collect();
+    unresolved.sort_by(|a, b| utf16_order(a, b));
+    unresolved.dedup();
+    Some(AnchorWriteRecord {
+        environment_id: environment_id.to_string(),
+        base_snapshot_id: base_snapshot_id.to_string(),
+        base_version,
+        base_aggregate_hash: base_aggregate_hash.to_string(),
+        entries: keyed.into_iter().map(|(_, f)| (*f).clone()).collect(),
+        unresolved_remote_entry_ids: unresolved,
+        updated_at: updated_at.to_string(),
+    })
+}
+
+pub fn anchor_record_payload(record: &AnchorWriteRecord) -> String {
+    let payload = AnchorWritePayload {
+        schema_version: SYNC_ANCHOR_SCHEMA_VERSION,
+        environment_id: record.environment_id.clone(),
+        base_snapshot_id: record.base_snapshot_id.clone(),
+        base_version: record.base_version,
+        base_aggregate_hash: record.base_aggregate_hash.clone(),
+        entries: record
+            .entries
+            .iter()
+            .map(|f| AnchorWriteEntryPayload {
+                variant_id: f.variant_id.clone(),
+                raw_path: f.raw_path.clone(),
+                relative_path: f.relative_path.clone(),
+                hash: f.hash.clone(),
+                size_bytes: f.size_bytes,
+            })
+            .collect(),
+        unresolved_remote_entry_ids: record.unresolved_remote_entry_ids.clone(),
+        updated_at: record.updated_at.clone(),
+    };
+    serde_json::to_string(&payload).unwrap_or_default()
+}
+
+pub fn anchor_db_key(user_id: &str, shop: &str, object_id: &str, environment_id: &str) -> String {
+    let key = serde_json::to_string(&[
+        user_id,
+        shop,
+        object_id,
+        "environment",
+        environment_id,
+    ])
+    .unwrap_or_default();
+    format!("{SYNC_ANCHORS_PREFIX}{key}")
+}
+
+pub fn anchor_legacy_db_key(user_id: &str, shop: &str, object_id: &str) -> String {
+    let key =
+        serde_json::to_string(&[user_id, shop, object_id]).unwrap_or_default();
+    format!("{SYNC_ANCHORS_PREFIX}{key}")
+}
+
+pub fn write_sync_anchor(
+    shop: &str,
+    object_id: &str,
+    user_id: &str,
+    environment_id: &str,
+    record: &AnchorWriteRecord,
+) -> anyhow::Result<()> {
+    let db_path = dirs::config_dir()
+        .map(|config| config.join("hydralauncher").join("hydra-db"))
+        .ok_or_else(|| anyhow::anyhow!("Home directory is unavailable"))?;
+    let mut options = Options::default();
+    options.create_if_missing = false;
+    let mut db = DB::open(db_path, options)
+        .map_err(|err| anyhow::anyhow!("Failed to open launcher database: {err}"))?;
+    let payload = anchor_record_payload(record);
+    db.put(
+        anchor_db_key(user_id, shop, object_id, environment_id).as_bytes(),
+        payload.as_bytes(),
+    )
+    .map_err(|err| anyhow::anyhow!("Failed to write sync anchor: {err}"))?;
+    let _ = db.delete(anchor_legacy_db_key(user_id, shop, object_id).as_bytes());
+    let _ = db.close();
+    Ok(())
 }
 
 pub fn get_library() -> String {
@@ -1871,6 +2105,88 @@ mod shortcut_tests {
 
         assert_eq!(prefix_environment_id(None), None);
 
+    }
+
+    fn anchor_entry(variant: &str, raw: &str, relative: &str) -> AnchorWriteEntry {
+        AnchorWriteEntry {
+            variant_id: variant.to_string(),
+            raw_path: raw.to_string(),
+            relative_path: relative.to_string(),
+            hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            size_bytes: 8,
+        }
+    }
+
+    #[test]
+    fn anchor_file_key_matches_json_triple() {
+        assert_eq!(anchor_file_key("v", "a/b", "c"), r#"["v","a/b","c"]"#);
+        assert_eq!(
+            anchor_file_key("a\"b\\c", "r", "p"),
+            r#"["a\"b\\c","r","p"]"#
+        );
+        assert_eq!(anchor_file_key("v", "𝄞", "￾"), r#"["v","𝄞","￾"]"#);
+    }
+
+    #[test]
+    fn anchor_builder_sorts_utf16_order_rejects_duplicates() {
+        let files = vec![
+            anchor_entry("v", "￾", "x"),
+            anchor_entry("v", "𝄞", "x"),
+            anchor_entry("v", "a", "x"),
+        ];
+        let record = build_sync_anchor_record(
+            "env",
+            "snap",
+            3,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            &files,
+            &[],
+            "2026-09-12T00:00:00.000Z",
+        )
+        .unwrap();
+        let raws: Vec<&str> = record.entries.iter().map(|f| f.raw_path.as_str()).collect();
+        assert_eq!(raws, vec!["a", "𝄞", "￾"]);
+        let duplicate = vec![
+            anchor_entry("v", "a", "x"),
+            anchor_entry("v", "a", "x"),
+        ];
+        assert!(build_sync_anchor_record("env", "snap", 3, "h", &duplicate, &[], "t").is_none());
+    }
+
+    #[test]
+    fn anchor_builder_filters_unresolved_to_known_json_ids() {
+        let files = vec![anchor_entry("v", "a", "x")];
+        let unresolved = vec![
+            "v\u{0}a\u{0}x".to_string(),
+            "v\u{0}a\u{0}x".to_string(),
+            "v\u{0}missing\u{0}x".to_string(),
+            "broken".to_string(),
+        ];
+        let record = build_sync_anchor_record("env", "snap", 2, "h", &files, &unresolved, "t").unwrap();
+        assert_eq!(record.unresolved_remote_entry_ids, vec![r#"["v","a","x"]"#.to_string()]);
+        assert!(build_sync_anchor_record("env", "", 2, "h", &files, &[], "t").is_none());
+        assert!(build_sync_anchor_record("env", "snap", 0, "h", &files, &[], "t").is_none());
+        assert!(build_sync_anchor_record("env", "snap", 2, "", &files, &[], "t").is_none());
+    }
+
+    #[test]
+    fn anchor_keys_and_payload_shape() {
+        assert_eq!(
+            anchor_db_key("u", "steam", "1", "e"),
+            "!cloud-save-sync-anchors![\"u\",\"steam\",\"1\",\"environment\",\"e\"]"
+        );
+        assert_eq!(
+            anchor_legacy_db_key("u", "steam", "1"),
+            "!cloud-save-sync-anchors![\"u\",\"steam\",\"1\"]"
+        );
+        let stamp = anchor_timestamp_now();
+        assert!(stamp.ends_with('Z'));
+        assert_eq!(stamp.len(), "2026-09-12T00:00:00.000Z".len());
+        let files = vec![anchor_entry("v", "a", "x")];
+        let record = build_sync_anchor_record("env", "snap", 2, "h", &files, &[], &stamp).unwrap();
+        let payload = anchor_record_payload(&record);
+        assert!(payload.starts_with(r#"{"schemaVersion":4,"environmentId":"env","baseSnapshotId":"snap","baseVersion":2,"baseAggregateHash":"h","entries":[{"variantId":"v","rawPath":"a","relativePath":"x","hash":""#));
+        assert!(payload.contains(r#""unresolvedRemoteEntryIds":[],"updatedAt":""#));
     }
 
 }

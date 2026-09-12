@@ -2,6 +2,8 @@ use hydra::{get_auth, get_library, download_game_artifact, resolve_shortcut_app_
 
 mod cloud_save;
 
+mod environment;
+
 mod hydra;
 
 mod merge;

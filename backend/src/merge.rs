@@ -26,9 +26,15 @@ impl ConflictEntry {
 
 }
 
+pub(crate) fn identity_key(variant_id: &str, raw_path: &str, relative_path: &str) -> String {
+
+    format!("{variant_id}\u{0}{raw_path}\u{0}{relative_path}")
+
+}
+
 fn key(entry: &StateEntry) -> String {
 
-    format!("{}\u{0}{}\u{0}{}", entry.variant_id, entry.raw_path, entry.relative_path)
+    identity_key(&entry.variant_id, &entry.raw_path, &entry.relative_path)
 
 }
 
