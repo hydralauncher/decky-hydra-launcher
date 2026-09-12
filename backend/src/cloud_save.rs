@@ -98,6 +98,8 @@ const TOKEN_REFRESH_GRACE_MS: f64 = 60_000.0;
 
 const ERROR_BODY_PREVIEW_CHARS: usize = 512;
 
+const MAX_SYNC_ATTEMPTS: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 #[serde(rename_all = "camelCase")]
@@ -1389,7 +1391,7 @@ pub async fn sync_cloud_save(
 
     let mut pre_resolution: Vec<String> = Vec::new();
 
-    for attempt in 0..2 {
+    for attempt in 0..MAX_SYNC_ATTEMPTS {
 
         let discovered = match discover_files(object_id, shop, operative.as_deref()).await {
 
@@ -2462,7 +2464,7 @@ async fn prepare_upload_commit(
 
     let mut committed: Option<CommitSnapshotResponse> = None;
 
-    for attempt in 0..2 {
+    for attempt in 0..MAX_SYNC_ATTEMPTS {
 
         let result = client
 

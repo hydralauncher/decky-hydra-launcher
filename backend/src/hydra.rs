@@ -1629,6 +1629,10 @@ fn unique_archive_path(dir: &std::path::Path, stem: &str) -> PathBuf {
     }
 }
 
+const ARTIFACT_DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 30;
+
+const ARTIFACT_DOWNLOAD_TOTAL_TIMEOUT_SECS: u64 = 3600;
+
 pub async fn export_game_artifact(
     download_url: &str,
     filename: &str,
@@ -1642,11 +1646,16 @@ pub async fn export_game_artifact(
     let stem = sanitize_legacy_save_archive_name(filename);
     let destination = unique_archive_path(&downloads, &stem);
     let client = Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(3600))
+        .connect_timeout(std::time::Duration::from_secs(ARTIFACT_DOWNLOAD_CONNECT_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(ARTIFACT_DOWNLOAD_TOTAL_TIMEOUT_SECS))
         .build()
         .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
-    let mut response = client.get(download_url).send().await?;
+    let mut response = client
+        .get(download_url)
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
     let mut file = File::create(&destination)?;
     while let Some(chunk) = response.chunk().await? {
         file.write_all(&chunk)?;
