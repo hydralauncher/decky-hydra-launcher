@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./hydra-api";
 import { toaster } from "@decky/api";
-import { Button, ConfirmModal, PanelSection, Spinner, showModal } from "@decky/ui";
+import { Button, ConfirmModal, PanelSection, Spinner } from "@decky/ui";
+import { closeActiveModal, showSingleModal } from "./modal";
 import { composeToastLogo, formatBytes } from "./helpers";
 import { useAuthStore, useCloudSaveGuard, useCurrentGame, useUserStore } from "./stores";
 import { disengagePlayBlock, engagePlayBlock } from "./play-block";
@@ -27,6 +28,12 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
   );
   const [artifacts, setArtifacts] = useState<GameArtifact[]>([]);
   const [hasConflict, setHasConflict] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      closeActiveModal();
+    };
+  }, []);
 
   const { auth, setAuth } = useAuthStore();
   const { hasActiveSubscription } = useUserStore();
@@ -136,7 +143,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
   ]);
 
   const confirmForceSync = useCallback((retry: () => void) => {
-    showModal(
+    showSingleModal(
       <ConfirmModal
         strTitle="Overwrite Newer Cloud Save?"
         strDescription="A newer cloud save exists for this game. Syncing now will overwrite it with your local save."
@@ -228,7 +235,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
   const syncNow = useCallback(() => runSync(false), [runSync]);
 
   const confirmRestore = useCallback(() => {
-    showModal(
+    showSingleModal(
       <ConfirmModal
         strTitle="Confirm Cloud Save Restore"
         strDescription="Are you sure you want to restore this cloud save? This will replace your current local save files."
