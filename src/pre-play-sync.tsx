@@ -37,7 +37,9 @@ const verifiedAt = new Map<string, number>();
 const notifiedThisSession = new Set<string>();
 const hydraRunningToastShown = new Set<string>();
 
-const VERIFIED_TTL_MS = 5 * 60 * 1000;
+const VERIFIED_TTL_MS = 30_000;
+
+const BUSY_ATTACH_TIMEOUT_MS = 30_000;
 
 const isRecentlyVerified = (objectId: string): boolean => {
   const at = verifiedAt.get(objectId);
@@ -93,8 +95,26 @@ export const trackBusy = <T,>(
   return active.promise.then(run, run);
 };
 
-export const waitForBusy = (objectId: string): Promise<unknown> | undefined =>
-  busy.get(objectId)?.promise.catch(() => {});
+export const waitForBusy = (
+  objectId: string,
+  timeoutMs: number = BUSY_ATTACH_TIMEOUT_MS
+): Promise<unknown> => {
+  const active = busy.get(objectId);
+  if (!active) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), timeoutMs);
+    active.promise.then(
+      () => {
+        clearTimeout(timer);
+        resolve(undefined);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(undefined);
+      }
+    );
+  });
+};
 
 export const isOperationActive = (objectId: string): boolean =>
   busy.has(objectId);
@@ -123,8 +143,8 @@ const onGamePageOpen = async (appId: string) => {
       if (!hydraRunningToastShown.has(String(appId))) {
         hydraRunningToastShown.add(String(appId));
         toaster.toast({
-          title: "Desktop launcher active",
-          body: "Hydra launcher is running, Deck cloud sync is paused to avoid conflicts.",
+            title: "Desktop launcher active",
+            body: "Deck sync is paused while the desktop launcher runs.",
         });
       }
       return;
@@ -186,24 +206,26 @@ const onGamePageOpen = async (appId: string) => {
     return;
   }
 
-  engagePlayBlock(game.objectId);
-
   if (busy.has(game.objectId)) {
     logSkipOnce(`${game.objectId}:busy`, `attach in-flight (${game.objectId})`);
     await waitForBusy(game.objectId);
     return;
   }
 
+  engagePlayBlock(game.objectId);
+
   const work = (async () => {
     let status;
+    useSyncStatusStore.getState().setChecking(game.objectId, true);
     try {
-      engagePlayBlock(game.objectId);
       status = await checkCloudSaveStatus(auth, game.objectId, game.shop, game.winePrefixPath);
     } catch (error) {
       logEvent(`pre-play status failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
+      useSyncStatusStore.getState().setChecking(game.objectId, false);
       disengagePlayBlock(game.objectId);
       return;
     }
+    useSyncStatusStore.getState().setChecking(game.objectId, false);
     if (status.auth) useAuthStore.getState().setAuth(status.auth);
     useSyncStatusStore.getState().setStatus(game.objectId, {
       remoteVersion: status.remoteVersion ?? null,
@@ -245,14 +267,14 @@ const onGamePageOpen = async (appId: string) => {
           markPrePlayVerified(game.objectId);
           toaster.toast({
             title: "Cloud save restored",
-            body: `${game.title} save is up to date (${result.restoredFiles} files).`,
+            body: `${game.title} is up to date (${result.restoredFiles} files).`,
             logo: composeToastLogo(game.iconUrl),
             icon: <PiCloudArrowDown size={20} />,
           });
         } else {
           toaster.toast({
             title: "Cloud save partially restored",
-            body: `${game.title}: ${result.skippedFiles.length} files could not be restored.`,
+            body: `${game.title}: couldn't restore ${result.skippedFiles.length} files.`,
             logo: composeToastLogo(game.iconUrl),
             icon: <PiCloudArrowDown size={20} />,
           });
@@ -263,7 +285,7 @@ const onGamePageOpen = async (appId: string) => {
         logEvent(`auto-restore failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
         toaster.toast({
           title: "Cloud save sync failed",
-          body: `Could not restore the cloud save for ${game.title}. Your local save was not modified.`,
+          body: `Restore failed for ${game.title}. Local save untouched.`,
         });
       } finally {
         disengagePlayBlock(game.objectId);
@@ -277,8 +299,7 @@ const onGamePageOpen = async (appId: string) => {
       logEvent(`pre-play conflict notice: ${game.objectId}`);
       toaster.toast({
         title: "Save sync needs a decision",
-        body: `${game.title} has save changes both locally and in the cloud. Open the Hydra plugin → Pending decisions to choose which to keep.`,
-        logo: composeToastLogo(game.iconUrl),
+        body: `${game.title}: changed on both sides. Choose in Hydra → Pending decisions.`,
       });
     }
   })();

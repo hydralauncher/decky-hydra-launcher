@@ -1,4 +1,5 @@
-import { DialogButtonPrimary, Navigation, QuickAccessTab, Spinner } from "@decky/ui";
+import { DialogButtonPrimary, GamepadButton, Navigation, QuickAccessTab, Spinner } from "@decky/ui";
+import type { GamepadEvent } from "@decky/ui";
 import { toaster, useQuickAccessVisible } from "@decky/api";
 import {
   PiCloud,
@@ -109,6 +110,7 @@ const catcherStyle: CSSProperties = {
   inset: 0,
   zIndex: 9999,
   backgroundColor: "rgba(0, 0, 0, 0)",
+  pointerEvents: "none",
 };
 
 const cardStyle: CSSProperties = {
@@ -207,15 +209,6 @@ const formatDateTime = (iso: string | null): string | null => {
   return new Date(ms).toLocaleString();
 };
 
-const isFocusInside = (root: Element | null): boolean => {
-  try {
-    const active = ownerDocumentOf(root)?.activeElement ?? null;
-    return !!active && active !== root && (root?.contains(active) ?? false);
-  } catch {
-    return false;
-  }
-};
-
 const ownerDocumentOf = (node: Element | null): Document | null =>
   node?.ownerDocument ?? null;
 
@@ -223,19 +216,20 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
   const blockedGames = usePlayBlockStore((state) => state.blockedGames);
   const remoteNewerGames = useCloudSaveGuard((state) => state.remoteNewerGames);
   const lastStatus = useSyncStatusStore((state) => state.lastStatus);
+  const checkingStatus = useSyncStatusStore((state) => state.checking);
   const qamVisible = useQamVisible();
   const [visible, setVisible] = useState(false);
   const [resolving, setResolving] = useState<"local" | "remote" | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const scrimRef = useRef<HTMLDivElement>(null);
   const primaryActionRef = useRef<HTMLDivElement>(null);
+  const secondaryActionRef = useRef<HTMLDivElement>(null);
   const previousFocus = useRef<Element | null>(null);
   const wasBlocked = useRef(false);
-  const metricsLogged = useRef(false);
-  const retrapLogged = useRef(false);
 
   const game = findGameByShortcutId(appid);
   const blocked = game ? blockedGames.has(game.objectId) : false;
+  const conflicted = game ? remoteNewerGames.includes(game.objectId) : false;
 
   useEffect(() => {
     setQamOpen(qamVisible);
@@ -245,8 +239,6 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
   useEffect(() => {
     if (blocked && !wasBlocked.current) {
       wasBlocked.current = true;
-      metricsLogged.current = false;
-      retrapLogged.current = false;
       logEvent(
         `sync overlay show: ${game?.objectId ?? appid} conflict=${remoteNewerGames.includes(game?.objectId ?? "")} qamHook=${qamHookAvailable} nav=${navAvailable()} spinner=${spinnerAvailable}`
       );
@@ -270,67 +262,7 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
   }, [blocked]);
 
   useEffect(() => {
-    const doc = ownerDocumentOf(scrimRef.current);
-    if (!blocked || qamVisible || !doc) return;
-    const retrap = (event: Event) => {
-      const target = event.target as Element | null;
-      if (!target || typeof target !== "object" || (target as Node).nodeType !== 1) return;
-      const element = target as Element;
-      if (typeof element.closest === "function" && element.closest(`[${SYNC_OVERLAY_ATTR}]`)) return;
-      if (!retrapLogged.current) {
-        retrapLogged.current = true;
-        logEvent(`play block: focus re-trapped on ${game?.objectId ?? appid}`);
-      }
-      try {
-        const fallback =
-          primaryActionRef.current ?? cardRef.current ?? scrimRef.current;
-        fallback?.focus({ preventScroll: true });
-      } catch {
-        return;
-      }
-    };
-    doc.addEventListener("focusin", retrap, { capture: true });
-    return () => doc.removeEventListener("focusin", retrap, { capture: true });
-  }, [blocked, qamVisible, appid, game]);
-
-  useEffect(() => {
-    if (!blocked || !visible || metricsLogged.current) return;
-    const scrim = scrimRef.current;
-    const doc = ownerDocumentOf(scrim);
-    if (!scrim || !doc) return;
-    metricsLogged.current = true;
-    const timer = setTimeout(() => {
-      try {
-        const view = doc.defaultView;
-        const getStyle = view?.getComputedStyle?.bind(view) ?? window.getComputedStyle.bind(window);
-        const rect = scrim.getBoundingClientRect();
-        const computed = getStyle(scrim);
-        const card = cardRef.current;
-        const cardRect = card?.getBoundingClientRect();
-        const chain: string[] = [];
-        let node = scrim.parentElement;
-        while (node && chain.length < 6) {
-          const style = getStyle(node);
-          const cls: unknown = node.getAttribute("class");
-          chain.push(
-            `${node.tagName.toLowerCase()}.${String(cls ?? "").slice(0, 40)}@${style.position}/${style.transform.slice(0, 24)}/${style.display}`
-          );
-          node = node.parentElement;
-        }
-        logEvent(
-          `sync overlay metrics: doc=${doc.URL.slice(0, 80)} viewport=${view?.innerWidth ?? -1}x${view?.innerHeight ?? -1} connected=${scrim.isConnected} kids=${scrim.childElementCount} ${Math.round(rect.width)}x${Math.round(rect.height)}@${Math.round(rect.x)},${Math.round(rect.y)} opacity=${computed.opacity} z=${computed.zIndex} position=${computed.position} display=${computed.display} card=${card ? `${Math.round(cardRect?.width ?? -1)}x${Math.round(cardRect?.height ?? -1)}` : "none"} focusInside=${isFocusInside(scrim)} chain=[${chain.join(" < ")}]`
-        );
-      } catch (error) {
-        logEvent(
-          `sync overlay metrics failed: ${error instanceof Error ? error.message : "unknown"}`
-        );
-      }
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [blocked, visible]);
-
-  useEffect(() => {
-    if (!blocked || !visible || qamVisible) return;
+    if (!blocked || !visible || qamVisible || !conflicted) return;
     const doc = ownerDocumentOf(scrimRef.current);
     try {
       const target = primaryActionRef.current ?? cardRef.current ?? scrimRef.current;
@@ -349,11 +281,9 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
         return;
       }
     };
-  }, [blocked, visible, qamVisible]);
+  }, [blocked, visible, qamVisible, conflicted]);
 
   if (!blocked || !game || qamVisible) return null;
-
-  const conflicted = remoteNewerGames.includes(game.objectId);
 
   if (!conflicted) {
     return (
@@ -367,6 +297,8 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
   }
 
   const snapshot = lastStatus[game.objectId];
+  const statusChecking = checkingStatus[game.objectId] ?? false;
+  const pendingLabel = statusChecking ? "Checking…" : "unknown";
 
   const localDetail = [
     snapshot?.localFileCount != null ? `${snapshot.localFileCount} files` : null,
@@ -401,7 +333,7 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
       );
       toaster.toast({
         title: "Save sync needs a decision",
-        body: "Open the Hydra plugin → Pending decisions to choose which save to keep.",
+        body: "Open Hydra → Pending decisions to choose.",
       });
     }
   };
@@ -466,6 +398,17 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
     }
   };
 
+  const trapDirection = (side: "local" | "cloud") => (evt: GamepadEvent) => {
+    const button = evt.detail?.button;
+    if (side === "local" && button === GamepadButton.DIR_DOWN) {
+      secondaryActionRef.current?.focus({ preventScroll: true });
+    } else if (side === "cloud" && button === GamepadButton.DIR_UP) {
+      primaryActionRef.current?.focus({ preventScroll: true });
+    }
+    evt.stopPropagation();
+    evt.preventDefault();
+  };
+
   return (
     <div
       ref={scrimRef}
@@ -480,12 +423,12 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
         <p style={subtitleStyle}>has conflicting saves</p>
         <div style={versionRowStyle}>
           <PiMonitor size={16} />
-          <span>Local {localDetail || "unknown"}</span>
+          <span>Local {localDetail || pendingLabel}</span>
         </div>
         {localDate ? <p style={versionSubStyle}>Last edited {localDate}</p> : null}
         <div style={versionRowStyle}>
           <PiCloud size={16} />
-          <span>Cloud {remoteDetail || "unknown"}</span>
+          <span>Cloud {remoteDetail || pendingLabel}</span>
         </div>
         {remoteDate ? <p style={versionSubStyle}>Last edited {remoteDate}</p> : null}
         <div style={actionsRowStyle}>
@@ -523,6 +466,8 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
               style={choiceButtonStyle}
               disabled={resolving !== null}
               onClick={() => resolveConflict("local")}
+              onGamepadDirection={trapDirection("local")}
+              onOKActionDescription="Keep local save"
             >
               <span style={choiceLabelStyle}>
                 <PiCloudArrowUp size={20} />
@@ -530,9 +475,12 @@ export const SyncBlockOverlayView = ({ appid }: { appid: string }) => {
               </span>
             </DialogButtonPrimary>
             <DialogButtonPrimary
+              ref={secondaryActionRef}
               style={choiceButtonStyle}
               disabled={resolving !== null}
               onClick={() => resolveConflict("remote")}
+              onGamepadDirection={trapDirection("cloud")}
+              onOKActionDescription="Keep cloud save"
             >
               <span style={choiceLabelStyle}>
                 <PiCloudArrowDown size={20} />

@@ -8,8 +8,10 @@ import { SYNC_OVERLAY_ATTR } from "./sync-block-overlay";
 
 export const PLAY_BLOCK_RELEASE_TIMEOUT_MS = 5 * 60 * 1000;
 const BLOCKED_TOAST_THROTTLE_MS = 5_000;
+const MAX_BLOCK_EXTENSIONS = 2;
 
 const releaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const releaseExtensions = new Map<string, number>();
 
 let activeAppPageId: string | null = null;
 export const setActiveAppPage = (appId: string | null) => {
@@ -71,11 +73,11 @@ const blockEvent = (event: Event) => {
       conflicted
         ? {
             title: "Save sync needs a decision",
-            body: "Open the Hydra plugin → Pending decisions to choose which save to keep.",
+            body: "Open Hydra → Pending decisions to choose.",
           }
         : {
             title: "Save sync in progress",
-            body: "Play is available as soon as the cloud save finishes syncing.",
+            body: "Play unlocks when the sync finishes.",
           }
     );
     if (!blockedAttemptLogged.has(objectId)) {
@@ -88,6 +90,7 @@ const blockEvent = (event: Event) => {
 export const engagePlayBlock = (objectId: string) => {
   const existing = releaseTimers.get(objectId);
   if (existing) clearTimeout(existing);
+  releaseExtensions.delete(objectId);
 
   usePlayBlockStore.getState().engage(objectId);
   logEvent(`play block: engaged ${objectId}`);
@@ -95,16 +98,19 @@ export const engagePlayBlock = (objectId: string) => {
   const armReleaseTimer = () => {
     const timer = setTimeout(() => {
       releaseTimers.delete(objectId);
-      if (isOperationActive(objectId)) {
-        logEvent(`play block: still busy, extending block for ${objectId}`);
+      const extensions = releaseExtensions.get(objectId) ?? 0;
+      if (isOperationActive(objectId) && extensions < MAX_BLOCK_EXTENSIONS) {
+        releaseExtensions.set(objectId, extensions + 1);
+        logEvent(`play block: still busy, extending block for ${objectId} (${extensions + 1}/${MAX_BLOCK_EXTENSIONS})`);
         armReleaseTimer();
         return;
       }
+      releaseExtensions.delete(objectId);
       disengagePlayBlock(objectId);
       logEvent(`play block: release timeout for ${objectId}`);
       toaster.toast({
         title: "Save sync is taking long",
-        body: "Play is enabled again. Progress still saves to the cloud after you exit.",
+        body: "Play is on again. Exit still syncs to the cloud.",
       });
     }, PLAY_BLOCK_RELEASE_TIMEOUT_MS);
     releaseTimers.set(objectId, timer);
@@ -115,6 +121,7 @@ export const engagePlayBlock = (objectId: string) => {
 
 export const disengagePlayBlock = (objectId: string) => {
   dismissSyncToast(objectId);
+  releaseExtensions.delete(objectId);
   if (!usePlayBlockStore.getState().blockedGames.has(objectId)) return;
   const timer = releaseTimers.get(objectId);
   if (timer) {

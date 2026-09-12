@@ -13,13 +13,20 @@ export interface SyncStatusSnapshot {
 
 interface SyncStatusStore {
   lastStatus: Record<string, SyncStatusSnapshot>;
+  checking: Record<string, boolean>;
   setStatus: (objectId: string, snapshot: SyncStatusSnapshot) => void;
+  setChecking: (objectId: string, checking: boolean) => void;
 }
 
 export const useSyncStatusStore = create<SyncStatusStore>()((set) => ({
   lastStatus: {},
+  checking: {},
   setStatus: (objectId, snapshot) =>
     set((state) => ({
       lastStatus: { ...state.lastStatus, [objectId]: snapshot },
+    })),
+  setChecking: (objectId, checking) =>
+    set((state) => ({
+      checking: { ...state.checking, [objectId]: checking },
     })),
 }));

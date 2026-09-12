@@ -9,8 +9,47 @@ import decky
 PLUGIN_DIR = decky.DECKY_PLUGIN_DIR
 BACKEND_PATH = f"{PLUGIN_DIR}/bin/backend"
 
+MAX_PLUGIN_LOGS = 10
+
+def _plugin_log_dir() -> str | None:
+    candidate = getattr(decky, "DECKY_PLUGIN_LOG_DIR", None)
+    if isinstance(candidate, str) and candidate:
+        return candidate
+    try:
+        with open(os.path.join(PLUGIN_DIR, "plugin.json"), encoding="utf-8") as handle:
+            name = json.load(handle).get("name")
+    except (OSError, ValueError):
+        name = None
+    if not isinstance(name, str) or not name:
+        return None
+    return os.path.join(os.path.dirname(os.path.dirname(PLUGIN_DIR)), "logs", name)
+
+def _prune_old_logs() -> None:
+    try:
+        log_dir = _plugin_log_dir()
+        if not log_dir:
+            return
+        entries = [
+            os.path.join(log_dir, name)
+            for name in os.listdir(log_dir)
+            if name.endswith(".log")
+        ]
+        entries = [path for path in entries if os.path.isfile(path)]
+        entries.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        for stale in entries[MAX_PLUGIN_LOGS:]:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+_prune_old_logs()
+
 BACKEND_TIMEOUT = 4 * 60 * 60
 STATUS_TIMEOUT = 30
+SYNC_TIMEOUT = 90 * 60
+RESTORE_TIMEOUT = 60 * 60
 
 _SAFE_ARG = re.compile(r"^[A-Za-z0-9_./~ -]{1,200}$")
 
@@ -75,7 +114,7 @@ class Plugin:
         args.append("force" if force else "")
         args.append(json.dumps(resolutions) if resolutions else "")
         args.append(shop)
-        result = await _run_backend(args, json.dumps(auth))
+        result = await _run_backend(args, json.dumps(auth), timeout=SYNC_TIMEOUT)
         payload = json.loads(result)
         decky.logger.info(
             "sync done for %s: version=%s files=%s uploaded=%s skipped=%s",
@@ -84,7 +123,7 @@ class Plugin:
         return payload
 
     async def restore_cloud_save(self, auth: dict, object_id: str, shop: str, wine_prefix: str | None):
-        result = await _run_backend(["restore-cloud-save", object_id, wine_prefix or "", shop], json.dumps(auth))
+        result = await _run_backend(["restore-cloud-save", object_id, wine_prefix or "", shop], json.dumps(auth), timeout=RESTORE_TIMEOUT)
         payload = json.loads(result)
         decky.logger.info(
             "restore done for %s: version=%s restored=%s skipped=%s",

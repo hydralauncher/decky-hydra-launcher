@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "./hydra-api";
 import { toaster } from "@decky/api";
-import { Button, ConfirmModal, DialogBody, DialogBodyText, DialogButtonPrimary, DialogFooter, DialogHeader, ModalRoot, PanelSection, Spinner, showModal } from "@decky/ui";
-import type { ShowModalResult } from "@decky/ui";
+import { Button, ConfirmModal, PanelSection, Spinner, showModal } from "@decky/ui";
 import { composeToastLogo, formatBytes } from "./helpers";
 import { useAuthStore, useCloudSaveGuard, useCurrentGame, useUserStore } from "./stores";
 import { disengagePlayBlock, engagePlayBlock } from "./play-block";
@@ -17,27 +16,6 @@ export interface GameCloudSavesProps {
   game: Game;
 }
 
-const QamConflictModal = ({
-  description,
-  onLocal,
-  onCloud,
-}: {
-  description: string;
-  onLocal: () => void;
-  onCloud: () => void;
-}) => (
-  <ModalRoot onCancel={() => undefined} onEscKeypress={() => undefined}>
-    <DialogHeader>Cloud Save Conflict</DialogHeader>
-    <DialogBody>
-      <DialogBodyText>{description}</DialogBodyText>
-    </DialogBody>
-    <DialogFooter>
-      <DialogButtonPrimary onClick={onLocal}>Keep Local</DialogButtonPrimary>
-      <DialogButtonPrimary onClick={onCloud}>Keep Cloud</DialogButtonPrimary>
-    </DialogFooter>
-  </ModalRoot>
-);
-
 export function GameCloudSaves({ game }: GameCloudSavesProps) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
@@ -48,6 +26,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
     null
   );
   const [artifacts, setArtifacts] = useState<GameArtifact[]>([]);
+  const [hasConflict, setHasConflict] = useState(false);
 
   const { auth, setAuth } = useAuthStore();
   const { hasActiveSubscription } = useUserStore();
@@ -108,7 +87,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
 
     toaster.toast({
       title: "Restoring cloud save...",
-      body: "Please wait while we download and install your save",
+      body: "Downloading and installing your save",
     });
 
     try {
@@ -121,6 +100,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       if (result.auth) setAuth(result.auth);
 
       if (result.skippedFiles.length === 0) {
+        setHasConflict(false);
         useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
         invalidatePrePlayCache(game.objectId);
       }
@@ -198,35 +178,11 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         if (!result.ok && result.conflict) {
           setIsSyncing(false);
           useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
-          const names = result.conflict.map((identity) => {
-            const parts = identity.split("\u0000");
-            return parts.slice(1).join("/");
-          });
-          const resolveAll = (side: "local" | "remote") => {
-            if (side === "remote") {
-              restore();
-              return;
-            }
-            runSync(true);
-          };
-          let conflictModal: ShowModalResult | null = null;
-          const dismissConflictModal = () => conflictModal?.Close();
-          conflictModal = showModal(
-            <QamConflictModal
-              description={`Both this device and the cloud changed ${names.length} file(s): ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}. Everything else merges automatically; choose the side for these.`}
-              onLocal={() => {
-                dismissConflictModal();
-                resolveAll("local");
-              }}
-              onCloud={() => {
-                dismissConflictModal();
-                resolveAll("remote");
-              }}
-            />
-          );
+          setHasConflict(true);
           return;
         }
 
+        setHasConflict(false);
         useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
         invalidatePrePlayCache(game.objectId);
         disengagePlayBlock(game.objectId);
@@ -265,7 +221,6 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
       game.iconUrl,
       setAuth,
       getSnapshot,
-      restore,
       confirmForceSync,
     ]
   );
@@ -343,6 +298,13 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
           </span>
         )}
 
+        {hasConflict && (
+          <span className="game-cloud-saves__warning">
+            Both this device and the cloud changed the same save files.
+            Everything else merges automatically; choose the side to keep.
+          </span>
+        )}
+
         {!canSync && (
           <span className="game-cloud-saves__info">
             Cloud saves require an active Hydra Cloud subscription.
@@ -385,6 +347,26 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
             "Restore Cloud Save"
           )}
         </Button>
+
+        {hasConflict && (
+          <>
+            <Button
+              className="cloud-save"
+              onClick={() => runSync(true)}
+              disabled={isGameRunning || !canSync || isSyncing || isRestoring}
+            >
+              Keep Local
+            </Button>
+
+            <Button
+              className="cloud-save"
+              onClick={restore}
+              disabled={isGameRunning || !canSync || isSyncing || isRestoring}
+            >
+              Keep Cloud
+            </Button>
+          </>
+        )}
       </div>
     </PanelSection>
 

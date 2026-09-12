@@ -4178,13 +4178,27 @@ pub async fn check_cloud_save_status(
 
                                     .collect();
 
-                                for id in local_ids.difference(&remote_ids).take(5) {
+                                let local_only: Vec<&String> = local_ids
+                                    .difference(&remote_ids)
+                                    .collect();
+
+                                let remote_only: Vec<&String> = remote_ids
+                                    .difference(&local_ids)
+                                    .collect();
+
+                                eprintln!(
+                                    "status mismatch: {} local-only, {} remote-only",
+                                    local_only.len(),
+                                    remote_only.len()
+                                );
+
+                                for id in local_only.iter().take(2) {
 
                                     eprintln!("status mismatch, local only: {id}");
 
                                 }
 
-                                for id in remote_ids.difference(&local_ids).take(5) {
+                                for id in remote_only.iter().take(2) {
 
                                     eprintln!("status mismatch, remote only: {id}");
 

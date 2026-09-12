@@ -115,9 +115,14 @@ const onAppLifetimeNotification = async (
   const game = library.find((game) => {
     return (
       game.objectId === unAppID ||
+      String(game.steamShortcutAppId ?? "") === unAppID ||
       game.winePrefixPath?.split("/").includes(unAppID)
     );
   });
+
+  logEvent(
+    `app lifetime: unAppID=${unAppID} running=${notification.bRunning} match=${game ? game.objectId : "none"}`
+  );
 
   if (game) {
     logEvent(
@@ -152,7 +157,7 @@ const onAppLifetimeNotification = async (
               if (useCurrentGame.getState().objectId === game.objectId) {
                 toaster.toast({
                   title: "Newer cloud save available",
-                  body: `${game.title} has a newer save in the cloud. This session will not sync — restore it from the Hydra plugin to keep the cloud version.`,
+                  body: `${game.title}: newer save in the cloud. This session won't sync — restore it in Hydra.`,
                   logo: composeToastLogo(game.iconUrl),
                 });
               }
@@ -163,10 +168,14 @@ const onAppLifetimeNotification = async (
           })
           .catch((err) => {
             console.error("Failed to check cloud save status", err);
-            useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+            const message = err instanceof Error ? err.message : "unknown";
+            logEvent(`launch status failed: ${game.objectId}: ${message}`);
+            if (message.includes("remote-newer")) {
+              useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
+            }
             toaster.toast({
               title: "Cloud save status unknown",
-              body: `Could not check the cloud save for ${game.title}. This session will not auto-sync as a precaution.`,
+              body: `Couldn't check ${game.title}. Exit sync still runs at close.`,
             });
           })
           .finally(() => {
@@ -228,11 +237,12 @@ const onAppLifetimeNotification = async (
       .remoteNewerGames.includes(game.objectId);
 
     if (remoteNewer) {
+      logEvent(`auto-sync skipped: remote newer (${game.objectId})`);
       toaster.toast({
         title: "Cloud sync skipped",
-        body: `${game.title} has a newer save in the cloud. Restore it from the Hydra plugin, or sync manually to overwrite the cloud version.`,
-        logo: composeToastLogo(game.iconUrl),
-      });
+        body: `${game.title}: newer save in the cloud. Restore in Hydra, or sync to overwrite it.`,
+          logo: composeToastLogo(game.iconUrl),
+        });
       return;
     }
 
@@ -268,7 +278,7 @@ const onAppLifetimeNotification = async (
           disengagePlayBlock(game.objectId);
           toaster.toast({
             title: "Cloud save conflict",
-            body: `${game.title}: ${result.conflict.length} file(s) changed on both this device and the cloud. Open the Hydra plugin to choose which to keep.`,
+            body: `${game.title}: changed on both sides. Choose which to keep in Hydra.`,
             logo: composeToastLogo(game.iconUrl),
           });
           return;
@@ -276,7 +286,7 @@ const onAppLifetimeNotification = async (
 
         toaster.toast({
           title: "Cloud save synced",
-          body: `${game.title} save has been uploaded to the cloud`,
+          body: `${game.title}: save uploaded to the cloud`,
           logo: composeToastLogo(game.iconUrl),
           icon: <PiCloudArrowUp size={20} />,
         });
@@ -295,7 +305,7 @@ const onAppLifetimeNotification = async (
           disengagePlayBlock(game.objectId);
           toaster.toast({
             title: "Cloud sync skipped",
-            body: `${game.title} has a newer save in the cloud. Restore it from the Hydra plugin, or sync manually to overwrite the cloud version.`,
+            body: `${game.title}: newer save in the cloud. Restore in Hydra, or sync to overwrite it.`,
             logo: composeToastLogo(game.iconUrl),
           });
           return;
@@ -306,6 +316,10 @@ const onAppLifetimeNotification = async (
           body: error instanceof Error ? error.message : "Unknown error",
         });
       }
+    } else {
+      logEvent(
+        `auto-sync skipped: ${game.objectId} (autoSync=${game.automaticCloudSync} auth=${Boolean(freshAuth)} sub=${Boolean(freshSubscription)} hydraRunning=${isHydraRunning})`
+      );
     }
   }
 };
