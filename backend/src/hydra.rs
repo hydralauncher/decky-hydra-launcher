@@ -1650,16 +1650,24 @@ pub async fn export_game_artifact(
         .timeout(std::time::Duration::from_secs(ARTIFACT_DOWNLOAD_TOTAL_TIMEOUT_SECS))
         .build()
         .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
-    let mut response = client
-        .get(download_url)
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
-    let mut file = File::create(&destination)?;
-    while let Some(chunk) = response.chunk().await? {
-        file.write_all(&chunk)?;
+    let download: Result<(), Box<dyn std::error::Error>> = async {
+        let mut response = client
+            .get(download_url)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
+        let mut file = File::create(&destination)?;
+        while let Some(chunk) = response.chunk().await? {
+            file.write_all(&chunk)?;
+        }
+        Ok(())
     }
+    .await;
+    if download.is_err() {
+        let _ = std::fs::remove_file(&destination);
+    }
+    download?;
     Ok(destination.to_string_lossy().to_string())
 }
 

@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 
 import { Button, ConfirmModal, showModal } from "@decky/ui";
 import { useDate } from "./hooks";
@@ -11,17 +11,17 @@ import { composeToastLogo, formatBytes } from "./helpers";
 export interface GameCloudSaveProps {
   artifact: GameArtifact;
   game: Game;
-  isGameRunning: boolean;
 }
 
 export function GameCloudSave({
   artifact,
   game,
-  isGameRunning,
 }: GameCloudSaveProps) {
   const { formatDate, formatDateTime } = useDate();
+  const [isExporting, setIsExporting] = useState(false);
 
   const exportArtifact = useCallback(async () => {
+    setIsExporting(true);
     toaster.toast({
       title: "Downloading backup...",
       body: "Please wait while we download the backup",
@@ -44,7 +44,7 @@ export function GameCloudSave({
 
       toaster.toast({
         title: "Backup downloaded",
-        body: result.path,
+        body: result.path.split("/").pop() ?? result.path,
         logo: composeToastLogo(game.iconUrl),
       });
     } catch (error: unknown) {
@@ -54,6 +54,8 @@ export function GameCloudSave({
         title: "Failed to download backup",
         body: "Please check if all game files are correct",
       });
+    } finally {
+      setIsExporting(false);
     }
   }, [artifact, formatDate, game.iconUrl]);
 
@@ -74,7 +76,7 @@ export function GameCloudSave({
       key={artifact.id}
       className="cloud-save"
       onClick={confirmArtifactDownload}
-      disabled={isGameRunning}
+      disabled={isExporting}
     >
       <p>{artifact.label ?? `Backup from ${formatDate(artifact.createdAt)}`}</p>
 

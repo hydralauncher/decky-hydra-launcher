@@ -65,7 +65,7 @@ function Plugin() {
       case "auth-guide":
         return <AuthGuide />;
       case "game":
-        return <GameCloudSaves game={route.params.game as Game} />;
+        return <GameCloudSaves key={(route.params.game as Game).objectId} game={route.params.game as Game} />;
       case "home":
         return <Home />;
       default:

@@ -116,10 +116,16 @@ class Plugin:
         args.append(shop)
         result = await _run_backend(args, json.dumps(auth), timeout=SYNC_TIMEOUT)
         payload = json.loads(result)
-        decky.logger.info(
-            "sync done for %s: version=%s files=%s uploaded=%s skipped=%s",
-            object_id, payload.get("version"), payload.get("fileCount"),
-            payload.get("uploadedFiles"), payload.get("skippedFiles"))
+        if not payload.get("ok", True):
+            decky.logger.info(
+                "sync conflict for %s: version=%s files=%s need a decision",
+                object_id, payload.get("version"),
+                len(payload.get("conflict") or []))
+        else:
+            decky.logger.info(
+                "sync done for %s: version=%s files=%s uploaded=%s skipped=%s",
+                object_id, payload.get("version"), payload.get("fileCount"),
+                payload.get("uploadedFiles"), payload.get("skippedFiles"))
         return payload
 
     async def restore_cloud_save(self, auth: dict, object_id: str, shop: str, wine_prefix: str | None):

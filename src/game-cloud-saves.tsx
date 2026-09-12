@@ -382,7 +382,6 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
               key={artifact.id}
               artifact={artifact}
               game={game}
-              isGameRunning={isGameRunning}
             />
           ))}
         </PanelSection>
