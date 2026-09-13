@@ -131,6 +131,67 @@ export const findGameByShortcutId = (appId: string): Game | undefined => {
   return library.find((game) => game.objectId === objectId);
 };
 
+export const clearShortcutNegativeCache = (): number => {
+  let cleared = 0;
+  for (const [key, value] of [...shortcutResolved]) {
+    if (value === null) {
+      shortcutResolved.delete(key);
+      cleared += 1;
+    }
+  }
+  return cleared;
+};
+
+export const getShortcutResolvedObjectIds = (): string[] => {
+  return [
+    ...new Set(
+      [...shortcutResolved.values()].filter(
+        (value): value is string => value !== null
+      )
+    ),
+  ];
+};
+
+export const isObjectIdCloudEligible = (objectId: string): boolean => {
+  const game = useLibraryStore
+    .getState()
+    .library.find((item) => item.objectId === objectId);
+  if (!game) return false;
+  if (game.steamShortcutAppId != null) return true;
+  return getShortcutResolvedObjectIds().includes(objectId);
+};
+
+export const resolveGameForAppId = async (
+  appId: string
+): Promise<Game | undefined> => {
+  let game = findGameByShortcutId(appId);
+  if (!game && !shortcutResolved.has(String(appId))) {
+    try {
+      const resolved = await resolveShortcut(String(appId));
+      shortcutResolved.set(String(appId), resolved?.objectId ?? null);
+    } catch {
+      return undefined;
+    }
+    game = findGameByShortcutId(appId);
+  }
+  if (!game) {
+    const mapped = shortcutResolved.get(String(appId));
+    const libraryMissing =
+      mapped != null &&
+      !useLibraryStore.getState().library.some((g) => g.objectId === mapped);
+    if (libraryMissing || !shortcutResolved.has(String(appId))) {
+      try {
+        useLibraryStore.getState().setLibrary(await getLibrary());
+        clearShortcutNegativeCache();
+      } catch {
+        return undefined;
+      }
+      game = findGameByShortcutId(appId);
+    }
+  }
+  return game;
+};
+
 const onGamePageOpen = async (appId: string) => {
   if (!useSyncSettings.getState().syncBeforePlay) {
     logSkipOnce(`page:${appId}:toggle-off`, `toggle off (page appid ${appId})`);
@@ -177,6 +238,7 @@ const onGamePageOpen = async (appId: string) => {
       !useLibraryStore.getState().library.some((g) => g.objectId === mapped);
     if (libraryMissing || !shortcutResolved.has(String(appId))) {
       useLibraryStore.getState().setLibrary(await getLibrary());
+      clearShortcutNegativeCache();
       game = findGameByShortcutId(appId);
     }
     if (!game) {

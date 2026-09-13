@@ -11,6 +11,7 @@ import {
 import { api } from "./hydra-api";
 import { usePlaytime } from "./hooks";
 import { HydraLogo } from "./components/hydra-logo";
+import { isObjectIdCloudEligible } from "./pre-play-sync";
 import type { GameAssets } from "./api-types";
 
 export function Home() {
@@ -111,7 +112,7 @@ export function Home() {
       {pendingDecisions.length > 0 && (
         <PanelSection title="Save sync decisions needed">
           {pendingDecisions
-            .filter((id) => library.some((g) => g.objectId === id))
+            .filter((id) => isObjectIdCloudEligible(id))
             .map((id) => {
             const game = library.find((g) => g.objectId === id);
             if (!game) return null;

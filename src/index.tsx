@@ -27,8 +27,11 @@ import {
   syncCloudSave,
 } from "./events";
 import {
+  clearShortcutNegativeCache,
   invalidatePrePlayCache,
+  isObjectIdCloudEligible,
   registerPrePlaySync,
+  resolveGameForAppId,
   trackBusy,
   unregisterPrePlaySync,
   waitForBusy,
@@ -109,82 +112,94 @@ const onAppLifetimeNotification = async (
 
   const library = await getLibrary();
   setLibrary(library);
+  clearShortcutNegativeCache();
 
   const unAppID = notification.unAppID.toString();
 
-  const game = library.find((game) => {
+  const libraryGame = library.find((item) => {
     return (
-      game.objectId === unAppID ||
-      String(game.steamShortcutAppId ?? "") === unAppID ||
-      game.winePrefixPath?.split("/").includes(unAppID)
+      item.objectId === unAppID ||
+      String(item.steamShortcutAppId ?? "") === unAppID
     );
   });
+  const cloudGame = await resolveGameForAppId(unAppID);
+  const playGame = cloudGame ?? libraryGame;
 
   logEvent(
-    `app lifetime: unAppID=${unAppID} running=${notification.bRunning} match=${game ? game.objectId : "none"}`
+    `app lifetime: unAppID=${unAppID} running=${notification.bRunning} library=${libraryGame ? libraryGame.objectId : "none"} eligible=${cloudGame ? cloudGame.objectId : "none"}`
   );
 
-  if (game) {
-    logEvent(
-      `app ${notification.bRunning ? "launch" : "exit"}: ${game.title} (${game.objectId})`
-    );
+  if (!playGame) {
+    logEvent(`lifetime skip: no library match for appid ${unAppID}`);
+    return;
+  }
+
+  logEvent(
+    `app ${notification.bRunning ? "launch" : "exit"}: ${playGame.title} (${playGame.objectId})`
+  );
 
     if (notification.bRunning) {
       const startedAt = new Date();
       lastTick = startedAt;
 
-      setObjectId(game.objectId);
-      setRemoteId(game.remoteId);
+      setObjectId(playGame.objectId);
+      setRemoteId(playGame.remoteId);
       setStartedAt(startedAt);
 
-      disengagePlayBlock(game.objectId);
+      if (!cloudGame) {
+        logEvent(`cloud skip: ineligible (${playGame.objectId})`);
+      }
 
-      const alreadyFlagged = useCloudSaveGuard
-        .getState()
-        .remoteNewerGames.includes(game.objectId);
+      if (cloudGame) {
+        disengagePlayBlock(cloudGame.objectId);
 
-      if (game.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
-        await waitForBusy(game.objectId);
+        const alreadyFlagged = useCloudSaveGuard
+          .getState()
+          .remoteNewerGames.includes(cloudGame.objectId);
 
-        const check = checkCloudSaveStatus(auth, game.objectId, game.shop, game.winePrefixPath)
-          .then((status) => {
-            if (status.auth) {
-              useAuthStore.getState().setAuth(status.auth);
-            }
-            if (status.remoteNewer) {
-              useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
-              logEvent(`guard flagged: ${game.objectId} (remote v${status.remoteVersion}, local v${status.localVersion ?? "none"})`);
-              if (useCurrentGame.getState().objectId === game.objectId) {
-                toaster.toast({
-                  title: "Newer cloud save available",
-                  body: `${game.title}: newer save in the cloud. This session won't sync — restore it in Hydra.`,
-                  logo: composeToastLogo(game.iconUrl),
-                });
+        if (cloudGame.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
+          await waitForBusy(cloudGame.objectId);
+
+          const check = checkCloudSaveStatus(auth, cloudGame.objectId, cloudGame.shop, cloudGame.winePrefixPath)
+            .then((status) => {
+              if (status.auth) {
+                useAuthStore.getState().setAuth(status.auth);
               }
-            } else {
-              useCloudSaveGuard.getState().clearRemoteNewer(game.objectId);
-              logEvent(`guard clear: ${game.objectId} (remote v${status.remoteVersion})`);
-            }
-          })
-          .catch((err) => {
-            console.error("Failed to check cloud save status", err);
-            const message = err instanceof Error ? err.message : "unknown";
-            logEvent(`launch status failed: ${game.objectId}: ${message}`);
-            if (message.includes("remote-newer")) {
-              useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
-            }
-            toaster.toast({
-              title: "Cloud save status unknown",
-              body: `Couldn't check ${game.title}. Exit sync still runs at close.`,
+              if (status.remoteNewer) {
+                useCloudSaveGuard.getState().flagRemoteNewer(cloudGame.objectId);
+                logEvent(`guard flagged: ${cloudGame.objectId} (remote v${status.remoteVersion}, local v${status.localVersion ?? "none"})`);
+                if (useCurrentGame.getState().objectId === cloudGame.objectId) {
+                  toaster.toast({
+                    title: "Newer cloud save available",
+                    body: `${cloudGame.title}: newer save in the cloud. This session won't sync — restore it in Hydra.`,
+                    logo: composeToastLogo(cloudGame.iconUrl),
+                  });
+                }
+              } else {
+                useCloudSaveGuard.getState().clearRemoteNewer(cloudGame.objectId);
+                logEvent(`guard clear: ${cloudGame.objectId} (remote v${status.remoteVersion})`);
+              }
+            })
+            .catch((err) => {
+              console.error("Failed to check cloud save status", err);
+              const message = err instanceof Error ? err.message : "unknown";
+              logEvent(`launch status failed: ${cloudGame.objectId}: ${message}`);
+              if (message.includes("remote-newer")) {
+                useCloudSaveGuard.getState().flagRemoteNewer(cloudGame.objectId);
+              }
+              toaster.toast({
+                title: "Cloud save status unknown",
+                body: `Couldn't check ${cloudGame.title}. Exit sync still runs at close.`,
+              });
+            })
+            .finally(() => {
+              if (pendingStatusChecks.get(cloudGame.objectId) === check) {
+                pendingStatusChecks.delete(cloudGame.objectId);
+              }
             });
-          })
-          .finally(() => {
-            if (pendingStatusChecks.get(game.objectId) === check) {
-              pendingStatusChecks.delete(game.objectId);
-            }
-          });
 
-        pendingStatusChecks.set(game.objectId, check);
+          pendingStatusChecks.set(cloudGame.objectId, check);
+        }
       }
 
       console.log("Started at", startedAt);
@@ -210,7 +225,7 @@ const onAppLifetimeNotification = async (
           lastTick = new Date();
 
           api
-            .put(`profile/games/${game.remoteId}`, {
+            .put(`profile/games/${playGame.remoteId}`, {
               json: {
                 playTimeDeltaInSeconds: secondsSinceLastTick,
                 lastTimePlayed: startedAt,
@@ -225,23 +240,28 @@ const onAppLifetimeNotification = async (
       return;
     }
 
+    if (!cloudGame) {
+      logEvent(`auto-sync skipped: ineligible (${playGame.objectId})`);
+      return;
+    }
+
     const isHydraRunning = await isHydraLauncherRunning();
 
-    await pendingStatusChecks.get(game.objectId)?.catch(() => {});
-    await waitForBusy(game.objectId);
+    await pendingStatusChecks.get(cloudGame.objectId)?.catch(() => {});
+    await waitForBusy(cloudGame.objectId);
 
-    invalidatePrePlayCache(game.objectId);
+    invalidatePrePlayCache(cloudGame.objectId);
 
     const remoteNewer = useCloudSaveGuard
       .getState()
-      .remoteNewerGames.includes(game.objectId);
+      .remoteNewerGames.includes(cloudGame.objectId);
 
     if (remoteNewer) {
-      logEvent(`auto-sync skipped: remote newer (${game.objectId})`);
+      logEvent(`auto-sync skipped: remote newer (${cloudGame.objectId})`);
       toaster.toast({
         title: "Cloud sync skipped",
-        body: `${game.title}: newer save in the cloud. Restore in Hydra, or sync to overwrite it.`,
-          logo: composeToastLogo(game.iconUrl),
+        body: `${cloudGame.title}: newer save in the cloud. Restore in Hydra, or sync to overwrite it.`,
+          logo: composeToastLogo(cloudGame.iconUrl),
         });
       return;
     }
@@ -250,20 +270,20 @@ const onAppLifetimeNotification = async (
     const freshSubscription = useUserStore.getState().hasActiveSubscription;
 
     if (
-      game.automaticCloudSync &&
+      cloudGame.automaticCloudSync &&
       freshAuth &&
       freshSubscription &&
       !isHydraRunning
     ) {
       try {
-        logEvent(`auto-sync start: ${game.objectId}`);
-        engagePlayBlock(game.objectId);
-        const result = await trackBusy(game.objectId, "sync", () =>
+        logEvent(`auto-sync start: ${cloudGame.objectId}`);
+        engagePlayBlock(cloudGame.objectId);
+        const result = await trackBusy(cloudGame.objectId, "sync", () =>
           syncCloudSave(
             freshAuth,
-            game.objectId,
-            game.shop,
-            game.winePrefixPath,
+            cloudGame.objectId,
+            cloudGame.shop,
+            cloudGame.winePrefixPath,
             false,
             null
           )
@@ -274,39 +294,39 @@ const onAppLifetimeNotification = async (
         }
 
         if (!result.ok && result.conflict) {
-          useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
-          disengagePlayBlock(game.objectId);
+          useCloudSaveGuard.getState().flagRemoteNewer(cloudGame.objectId);
+          disengagePlayBlock(cloudGame.objectId);
           toaster.toast({
             title: "Cloud save conflict",
-            body: `${game.title}: changed on both sides. Choose which to keep in Hydra.`,
-            logo: composeToastLogo(game.iconUrl),
+            body: `${cloudGame.title}: changed on both sides. Choose which to keep in Hydra.`,
+            logo: composeToastLogo(cloudGame.iconUrl),
           });
           return;
         }
 
         toaster.toast({
           title: "Cloud save synced",
-          body: `${game.title}: save uploaded to the cloud`,
-          logo: composeToastLogo(game.iconUrl),
+          body: `${cloudGame.title}: save uploaded to the cloud`,
+          logo: composeToastLogo(cloudGame.iconUrl),
           icon: <PiCloudArrowUp size={20} />,
         });
-        logEvent(`auto-sync done: ${game.objectId} v${result.version}`);
-        disengagePlayBlock(game.objectId);
+        logEvent(`auto-sync done: ${cloudGame.objectId} v${result.version}`);
+        disengagePlayBlock(cloudGame.objectId);
       } catch (error: unknown) {
         console.error("Failed to sync cloud save", error);
-        logEvent(`auto-sync failed: ${game.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
+        logEvent(`auto-sync failed: ${cloudGame.objectId}: ${error instanceof Error ? error.message : "unknown"}`);
 
-        if (!useCloudSaveGuard.getState().remoteNewerGames.includes(game.objectId)) {
-          disengagePlayBlock(game.objectId);
+        if (!useCloudSaveGuard.getState().remoteNewerGames.includes(cloudGame.objectId)) {
+          disengagePlayBlock(cloudGame.objectId);
         }
 
         if (error instanceof Error && error.message.includes("remote-newer")) {
-          useCloudSaveGuard.getState().flagRemoteNewer(game.objectId);
-          disengagePlayBlock(game.objectId);
+          useCloudSaveGuard.getState().flagRemoteNewer(cloudGame.objectId);
+          disengagePlayBlock(cloudGame.objectId);
           toaster.toast({
             title: "Cloud sync skipped",
-            body: `${game.title}: newer save in the cloud. Restore in Hydra, or sync to overwrite it.`,
-            logo: composeToastLogo(game.iconUrl),
+            body: `${cloudGame.title}: newer save in the cloud. Restore in Hydra, or sync to overwrite it.`,
+            logo: composeToastLogo(cloudGame.iconUrl),
           });
           return;
         }
@@ -318,10 +338,9 @@ const onAppLifetimeNotification = async (
       }
     } else {
       logEvent(
-        `auto-sync skipped: ${game.objectId} (autoSync=${game.automaticCloudSync} auth=${Boolean(freshAuth)} sub=${Boolean(freshSubscription)} hydraRunning=${isHydraRunning})`
+        `auto-sync skipped: ${cloudGame.objectId} (autoSync=${cloudGame.automaticCloudSync} auth=${Boolean(freshAuth)} sub=${Boolean(freshSubscription)} hydraRunning=${isHydraRunning})`
       );
     }
-  }
 };
 
 export default definePlugin(() => {
@@ -355,6 +374,14 @@ export default definePlugin(() => {
 
       getLibrary().then((library) => {
         setLibrary(library);
+        clearShortcutNegativeCache();
+        const guard = useCloudSaveGuard.getState();
+        for (const id of [...guard.remoteNewerGames]) {
+          if (!isObjectIdCloudEligible(id)) {
+            guard.clearRemoteNewer(id);
+            logEvent(`guard prune: ineligible (${id})`);
+          }
+        }
         const withIds = library.filter(
           (game) => game.steamShortcutAppId != null
         ).length;
