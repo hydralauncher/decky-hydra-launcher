@@ -28,6 +28,7 @@ export interface CloudSaveSyncResult {
   totalSizeBytes: number;
   uploadedFiles: number;
   skippedFiles: number;
+  noop?: boolean;
   auth?: Auth;
 }
 

@@ -1345,6 +1345,10 @@ pub struct SyncResult {
 
     pub skipped_files: usize,
 
+    #[serde(default)]
+
+    pub noop: bool,
+
     #[serde(skip_serializing_if = "Option::is_none")]
 
     pub auth: Option<Auth>,
@@ -1680,6 +1684,8 @@ pub async fn sync_cloud_save(
                             uploaded_files: 0,
 
                             skipped_files: 0,
+
+                            noop: false,
 
                             auth: Some(auth),
 
@@ -2027,6 +2033,8 @@ pub async fn sync_cloud_save(
 
                     skipped_files: files.len(),
 
+                    noop: true,
+
                     auth: Some(auth),
 
                 });
@@ -2217,6 +2225,8 @@ pub async fn sync_cloud_save(
         uploaded_files,
 
         skipped_files,
+
+        noop: false,
 
         auth: Some(auth),
 

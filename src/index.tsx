@@ -90,6 +90,24 @@ let lastTick: Date;
 
 const pendingStatusChecks = new Map<string, Promise<void>>();
 
+const sessionState = new Map<string, { status: "active" | "exited"; at: number }>();
+
+const recordSessionStart = (objectId: string) => {
+  sessionState.set(objectId, { status: "active", at: Date.now() });
+  if (sessionState.size > 50) {
+    const oldest = [...sessionState.entries()].sort((a, b) => a[1].at - b[1].at)[0]?.[0];
+    if (oldest) sessionState.delete(oldest);
+  }
+};
+
+const consumeSessionExit = (objectId: string): "active" | "exited" | "unknown" => {
+  const entry = sessionState.get(objectId);
+  if (!entry) return "unknown";
+  if (entry.status === "exited") return "exited";
+  sessionState.set(objectId, { status: "exited", at: Date.now() });
+  return "active";
+};
+
 const onAppLifetimeNotification = async (
   notification: AppLifetimeNotification
 ) => {
@@ -151,6 +169,7 @@ const onAppLifetimeNotification = async (
       }
 
       if (cloudGame) {
+        recordSessionStart(cloudGame.objectId);
         disengagePlayBlock(cloudGame.objectId);
 
         const alreadyFlagged = useCloudSaveGuard
@@ -245,6 +264,15 @@ const onAppLifetimeNotification = async (
       return;
     }
 
+    const session = consumeSessionExit(cloudGame.objectId);
+    if (session === "exited") {
+      logEvent(`auto-sync skipped: duplicate exit (${cloudGame.objectId})`);
+      return;
+    }
+    if (session === "unknown") {
+      logEvent(`exit without session record, proceeding (${cloudGame.objectId})`);
+    }
+
     const isHydraRunning = await isHydraLauncherRunning();
 
     await pendingStatusChecks.get(cloudGame.objectId)?.catch(() => {});
@@ -304,13 +332,19 @@ const onAppLifetimeNotification = async (
           return;
         }
 
+        if (result.noop) {
+          logEvent(`auto-sync no-op: unchanged (${cloudGame.objectId} v${result.version} uploaded ${result.uploadedFiles}/skipped ${result.skippedFiles})`);
+          disengagePlayBlock(cloudGame.objectId);
+          return;
+        }
+
         toaster.toast({
           title: "Cloud save synced",
           body: `${cloudGame.title}: save uploaded to the cloud`,
           logo: composeToastLogo(cloudGame.iconUrl),
           icon: <PiCloudArrowUp size={20} />,
         });
-        logEvent(`auto-sync done: ${cloudGame.objectId} v${result.version}`);
+        logEvent(`auto-sync done: ${cloudGame.objectId} v${result.version} uploaded ${result.uploadedFiles}/skipped ${result.skippedFiles}`);
         disengagePlayBlock(cloudGame.objectId);
       } catch (error: unknown) {
         console.error("Failed to sync cloud save", error);
