@@ -95,13 +95,16 @@ const pendingStatusChecks = new Map<string, Promise<void>>();
 
 const sessionState = new Map<string, { status: "active" | "exited"; at: number }>();
 
+const SESSION_TOMBSTONE_TTL_MS = 24 * 60 * 60 * 1000;
+const SESSION_STATE_MAX_ENTRIES = 50;
+
 const recordSessionStart = (objectId: string) => {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - SESSION_TOMBSTONE_TTL_MS;
   for (const [key, value] of [...sessionState]) {
     if (value.status === "exited" && value.at < cutoff) sessionState.delete(key);
   }
   sessionState.set(objectId, { status: "active", at: Date.now() });
-  while (sessionState.size > 50) {
+  while (sessionState.size > SESSION_STATE_MAX_ENTRIES) {
     const oldest = [...sessionState.entries()].sort((a, b) => a[1].at - b[1].at)[0]?.[0];
     if (!oldest) break;
     sessionState.delete(oldest);

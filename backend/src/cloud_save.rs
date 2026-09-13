@@ -98,6 +98,10 @@ const TOKEN_REFRESH_GRACE_MS: f64 = 60_000.0;
 
 const ERROR_BODY_PREVIEW_CHARS: usize = 512;
 
+const RESTORE_FILENAME_PREVIEW_CHARS: usize = 100;
+
+const STATUS_MISMATCH_SAMPLE_IDS: usize = 2;
+
 const MAX_SYNC_ATTEMPTS: u32 = 2;
 
 pub const REMOTE_NEWER_CODE: &str = "remote-newer";
@@ -3565,7 +3569,7 @@ pub async fn restore_cloud_save(
 
                 .unwrap_or_else(|| "save".to_string());
 
-            let file_name: String = file_name.chars().take(100).collect();
+            let file_name: String = file_name.chars().take(RESTORE_FILENAME_PREVIEW_CHARS).collect();
 
             let temp_target = target.with_file_name(format!(
 
@@ -4348,13 +4352,13 @@ pub async fn check_cloud_save_status(
                                     remote_only.len()
                                 );
 
-                                for id in local_only.iter().take(2) {
+                                for id in local_only.iter().take(STATUS_MISMATCH_SAMPLE_IDS) {
 
                                     eprintln!("status mismatch, local only: {id}");
 
                                 }
 
-                                for id in remote_only.iter().take(2) {
+                                for id in remote_only.iter().take(STATUS_MISMATCH_SAMPLE_IDS) {
 
                                     eprintln!("status mismatch, remote only: {id}");
 
