@@ -100,6 +100,8 @@ const ERROR_BODY_PREVIEW_CHARS: usize = 512;
 
 const MAX_SYNC_ATTEMPTS: u32 = 2;
 
+pub const REMOTE_NEWER_CODE: &str = "remote-newer";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 #[serde(rename_all = "camelCase")]
@@ -1516,7 +1518,7 @@ pub async fn sync_cloud_save(
 
                     if !discovered.complete {
 
-                        return Err(anyhow!("remote-newer"));
+                        return Err(anyhow!(REMOTE_NEWER_CODE));
 
                     }
 
@@ -1552,7 +1554,7 @@ pub async fn sync_cloud_save(
 
                     let Some(base_entries) = base_entries.filter(|e| !e.is_empty()) else {
 
-                        return Err(anyhow!("remote-newer"));
+                        return Err(anyhow!(REMOTE_NEWER_CODE));
 
                     };
 
@@ -2127,6 +2129,10 @@ pub async fn sync_cloud_save(
                 );
 
                 result = Some((committed, uploaded_files, skipped_files, entries));
+
+                if base_version == 0 {
+                    eprintln!("sync: initial baseline v1 committed for {object_id}");
+                }
 
                 break;
 

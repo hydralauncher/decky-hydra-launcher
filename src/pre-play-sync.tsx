@@ -131,6 +131,16 @@ export const findGameByShortcutId = (appId: string): Game | undefined => {
   return library.find((game) => game.objectId === objectId);
 };
 
+export const REMOTE_NEWER_CODE = "remote-newer";
+
+export const isRemoteNewerError = (error: unknown): boolean => {
+  if (error instanceof Error && error.message.includes(REMOTE_NEWER_CODE)) return true;
+  if (typeof error === "object" && error !== null && "code" in error) {
+    return (error as { code?: unknown }).code === REMOTE_NEWER_CODE;
+  }
+  return false;
+};
+
 export const clearShortcutNegativeCache = (): number => {
   let cleared = 0;
   for (const [key, value] of [...shortcutResolved]) {
@@ -142,7 +152,7 @@ export const clearShortcutNegativeCache = (): number => {
   return cleared;
 };
 
-export const getShortcutResolvedObjectIds = (): string[] => {
+const getShortcutResolvedObjectIds = (): string[] => {
   return [
     ...new Set(
       [...shortcutResolved.values()].filter(

@@ -30,6 +30,7 @@ import {
   clearShortcutNegativeCache,
   invalidatePrePlayCache,
   isObjectIdCloudEligible,
+  isRemoteNewerError,
   registerPrePlaySync,
   resolveGameForAppId,
   trackBusy,
@@ -93,10 +94,15 @@ const pendingStatusChecks = new Map<string, Promise<void>>();
 const sessionState = new Map<string, { status: "active" | "exited"; at: number }>();
 
 const recordSessionStart = (objectId: string) => {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const [key, value] of [...sessionState]) {
+    if (value.status === "exited" && value.at < cutoff) sessionState.delete(key);
+  }
   sessionState.set(objectId, { status: "active", at: Date.now() });
-  if (sessionState.size > 50) {
+  while (sessionState.size > 50) {
     const oldest = [...sessionState.entries()].sort((a, b) => a[1].at - b[1].at)[0]?.[0];
-    if (oldest) sessionState.delete(oldest);
+    if (!oldest) break;
+    sessionState.delete(oldest);
   }
 };
 
@@ -108,7 +114,9 @@ const consumeSessionExit = (objectId: string): "active" | "exited" | "unknown" =
   return "active";
 };
 
-const onAppLifetimeNotification = async (
+let lifetimeChain: Promise<void> = Promise.resolve();
+
+const handleAppLifetimeNotification = async (
   notification: AppLifetimeNotification
 ) => {
   const {
@@ -130,7 +138,10 @@ const onAppLifetimeNotification = async (
 
   const library = await getLibrary();
   setLibrary(library);
-  clearShortcutNegativeCache();
+  const clearedNegatives = clearShortcutNegativeCache();
+  if (clearedNegatives > 0) {
+    logEvent(`shortcut cache: cleared ${clearedNegatives} negatives`);
+  }
 
   const unAppID = notification.unAppID.toString();
 
@@ -172,11 +183,16 @@ const onAppLifetimeNotification = async (
         recordSessionStart(cloudGame.objectId);
         disengagePlayBlock(cloudGame.objectId);
 
+        const hydraAtLaunch = await isHydraLauncherRunning();
+        if (hydraAtLaunch) {
+          logEvent(`launch status skipped: hydra running (${cloudGame.objectId})`);
+        }
+
         const alreadyFlagged = useCloudSaveGuard
           .getState()
           .remoteNewerGames.includes(cloudGame.objectId);
 
-        if (cloudGame.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
+        if (!hydraAtLaunch && cloudGame.automaticCloudSync && auth && hasActiveSubscription && !alreadyFlagged) {
           await waitForBusy(cloudGame.objectId);
 
           const check = checkCloudSaveStatus(auth, cloudGame.objectId, cloudGame.shop, cloudGame.winePrefixPath)
@@ -203,7 +219,7 @@ const onAppLifetimeNotification = async (
               console.error("Failed to check cloud save status", err);
               const message = err instanceof Error ? err.message : "unknown";
               logEvent(`launch status failed: ${cloudGame.objectId}: ${message}`);
-              if (message.includes("remote-newer")) {
+              if (isRemoteNewerError(err)) {
                 useCloudSaveGuard.getState().flagRemoteNewer(cloudGame.objectId);
               }
               toaster.toast({
@@ -221,14 +237,10 @@ const onAppLifetimeNotification = async (
         }
       }
 
-      console.log("Started at", startedAt);
-
       updateInterval = setInterval(async () => {
         const secondsSinceLastTick = Math.floor(
           (new Date().getTime() - lastTick.getTime()) / 1_000
         );
-
-        console.log("Seconds since last tick", secondsSinceLastTick);
 
         setElapsedTimeInMillis(Date.now() - startedAt.getTime());
 
@@ -236,11 +248,9 @@ const onAppLifetimeNotification = async (
           const isHydraRunning = await isHydraLauncherRunning();
 
           if (isHydraRunning) {
-            console.log("Hydra is running, skipping playtime update");
             return;
           }
 
-          console.log("Updating playtime", secondsSinceLastTick);
           lastTick = new Date();
 
           api
@@ -354,7 +364,7 @@ const onAppLifetimeNotification = async (
           disengagePlayBlock(cloudGame.objectId);
         }
 
-        if (error instanceof Error && error.message.includes("remote-newer")) {
+        if (isRemoteNewerError(error)) {
           useCloudSaveGuard.getState().flagRemoteNewer(cloudGame.objectId);
           disengagePlayBlock(cloudGame.objectId);
           toaster.toast({
@@ -375,6 +385,14 @@ const onAppLifetimeNotification = async (
         `auto-sync skipped: ${cloudGame.objectId} (autoSync=${cloudGame.automaticCloudSync} auth=${Boolean(freshAuth)} sub=${Boolean(freshSubscription)} hydraRunning=${isHydraRunning})`
       );
     }
+};
+
+const onAppLifetimeNotification = (
+  notification: AppLifetimeNotification
+): Promise<void> => {
+  const next = lifetimeChain.then(() => handleAppLifetimeNotification(notification));
+  lifetimeChain = next.catch(() => {});
+  return next;
 };
 
 export default definePlugin(() => {
@@ -408,7 +426,10 @@ export default definePlugin(() => {
 
       getLibrary().then((library) => {
         setLibrary(library);
-        clearShortcutNegativeCache();
+        const cleared = clearShortcutNegativeCache();
+        if (cleared > 0) {
+          logEvent(`shortcut cache: cleared ${cleared} negatives`);
+        }
         const guard = useCloudSaveGuard.getState();
         for (const id of [...guard.remoteNewerGames]) {
           if (!isObjectIdCloudEligible(id)) {

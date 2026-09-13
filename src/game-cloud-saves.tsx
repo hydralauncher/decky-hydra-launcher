@@ -7,7 +7,7 @@ import { composeToastLogo, formatBytes } from "./helpers";
 import { useAuthStore, useCloudSaveGuard, useCurrentGame, useUserStore } from "./stores";
 import { disengagePlayBlock, engagePlayBlock } from "./play-block";
 import { restoreCloudSave, syncCloudSave } from "./events";
-import { invalidatePrePlayCache, trackBusy } from "./pre-play-sync";
+import { invalidatePrePlayCache, isObjectIdCloudEligible, isRemoteNewerError, trackBusy } from "./pre-play-sync";
 import { CheckIcon, CloudIcon } from "./components";
 import { useDate } from "./hooks";
 import { GameCloudSave } from "./game-cloud-save";
@@ -46,6 +46,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
 
   const isGameRunning = objectId === game.objectId;
   const canSync = Boolean(auth && hasActiveSubscription);
+  const shortcutEligible = isObjectIdCloudEligible(game.objectId);
 
   const getSnapshot = useCallback(async () => {
     setSnapshotState("loading");
@@ -202,7 +203,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
 
         getSnapshot();
       } catch (error: unknown) {
-        if (error instanceof Error && error.message.includes("remote-newer")) {
+        if (isRemoteNewerError(error)) {
           setIsSyncing(false);
           confirmForceSync(() => runSync(true));
           return;
@@ -312,6 +313,12 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
           </span>
         )}
 
+        {!shortcutEligible && (
+          <span className="game-cloud-saves__info">
+            Cloud sync requires a Steam shortcut for this game. Snapshot info stays available.
+          </span>
+        )}
+
         {!canSync && (
           <span className="game-cloud-saves__info">
             Cloud saves require an active Hydra Cloud subscription.
@@ -323,7 +330,7 @@ export function GameCloudSaves({ game }: GameCloudSavesProps) {
         <Button
           className="game-cloud-saves__new-backup"
           onClick={syncNow}
-          disabled={isGameRunning || !canSync || isSyncing || isRestoring}
+          disabled={isGameRunning || !canSync || !shortcutEligible || isSyncing || isRestoring}
         >
           {isSyncing ? (
             <>
