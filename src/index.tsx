@@ -28,8 +28,8 @@ import {
 } from "./events";
 import {
   clearShortcutNegativeCache,
+  hasShortcutResolution,
   invalidatePrePlayCache,
-  isObjectIdCloudEligible,
   isRemoteNewerError,
   registerPrePlaySync,
   resolveGameForAppId,
@@ -114,7 +114,7 @@ const consumeSessionExit = (objectId: string): "active" | "exited" | "unknown" =
   return "active";
 };
 
-let lifetimeChain: Promise<void> = Promise.resolve();
+const lifetimeChains = new Map<string, Promise<void>>();
 
 const handleAppLifetimeNotification = async (
   notification: AppLifetimeNotification
@@ -161,6 +161,14 @@ const handleAppLifetimeNotification = async (
   if (!playGame) {
     logEvent(`lifetime skip: no library match for appid ${unAppID}`);
     return;
+  }
+
+  if (!cloudGame && libraryGame && hasShortcutResolution(unAppID)) {
+    const guard = useCloudSaveGuard.getState();
+    if (guard.remoteNewerGames.includes(libraryGame.objectId)) {
+      guard.clearRemoteNewer(libraryGame.objectId);
+      logEvent(`guard prune: ineligible on sight (${libraryGame.objectId})`);
+    }
   }
 
   logEvent(
@@ -390,9 +398,14 @@ const handleAppLifetimeNotification = async (
 const onAppLifetimeNotification = (
   notification: AppLifetimeNotification
 ): Promise<void> => {
-  const next = lifetimeChain.then(() => handleAppLifetimeNotification(notification));
-  lifetimeChain = next.catch(() => {});
-  return next;
+  const key = String(notification.unAppID);
+  const prior = lifetimeChains.get(key) ?? Promise.resolve();
+  const next = prior.then(() => handleAppLifetimeNotification(notification));
+  const settled = next.catch(() => {});
+  lifetimeChains.set(key, settled);
+  return next.finally(() => {
+    if (lifetimeChains.get(key) === settled) lifetimeChains.delete(key);
+  });
 };
 
 export default definePlugin(() => {
@@ -432,9 +445,9 @@ export default definePlugin(() => {
         }
         const guard = useCloudSaveGuard.getState();
         for (const id of [...guard.remoteNewerGames]) {
-          if (!isObjectIdCloudEligible(id)) {
+          if (!library.some((game) => game.objectId === id)) {
             guard.clearRemoteNewer(id);
-            logEvent(`guard prune: ineligible (${id})`);
+            logEvent(`guard prune: deleted (${id})`);
           }
         }
         const withIds = library.filter(

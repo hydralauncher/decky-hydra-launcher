@@ -131,6 +131,10 @@ export const findGameByShortcutId = (appId: string): Game | undefined => {
   return library.find((game) => game.objectId === objectId);
 };
 
+export const hasShortcutResolution = (appId: string): boolean => {
+  return shortcutResolved.has(String(appId));
+};
+
 export const REMOTE_NEWER_CODE = "remote-newer";
 
 export const isRemoteNewerError = (error: unknown): boolean => {
