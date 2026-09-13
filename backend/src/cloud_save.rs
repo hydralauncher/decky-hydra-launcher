@@ -102,6 +102,10 @@ const MAX_SYNC_ATTEMPTS: u32 = 2;
 
 pub const REMOTE_NEWER_CODE: &str = "remote-newer";
 
+pub const VARIANT_ID_VERSION: u32 = 1;
+
+pub const SNAPSHOT_HASH_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 #[serde(rename_all = "camelCase")]
@@ -240,7 +244,7 @@ pub fn build_default_variant(shop: &str, object_id: &str) -> SnapshotVariant {
 
     let canonical = CanonicalVariant {
 
-        variant_id_version: 1,
+        variant_id_version: VARIANT_ID_VERSION,
 
         shop,
 
@@ -292,7 +296,7 @@ pub fn build_opaque_variant(shop: &str, object_id: &str, concrete_folder_id: &st
 
     let canonical = CanonicalVariant {
 
-        variant_id_version: 1,
+        variant_id_version: VARIANT_ID_VERSION,
 
         shop,
 
@@ -444,7 +448,7 @@ pub fn build_aggregate_hash(
 
     let canonical = CanonicalSnapshot {
 
-        snapshot_hash_version: 1,
+        snapshot_hash_version: SNAPSHOT_HASH_VERSION,
 
         variants: sorted_variants
 
@@ -5024,7 +5028,7 @@ mod tests {
 
         let canonical = CanonicalVariant {
 
-            variant_id_version: 1,
+            variant_id_version: VARIANT_ID_VERSION,
 
             shop,
 

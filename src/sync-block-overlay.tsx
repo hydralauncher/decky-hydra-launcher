@@ -33,6 +33,9 @@ import { composeToastLogo, formatBytes } from "./helpers";
 
 export const SYNC_OVERLAY_ATTR = "data-hydra-sync-overlay";
 
+const ERROR_MESSAGE_PREVIEW = 200;
+const STACK_PREVIEW = 120;
+
 const qamHookAvailable = typeof useQuickAccessVisible === "function";
 
 const useQamVisible = qamHookAvailable ? useQuickAccessVisible : () => false;
@@ -60,10 +63,10 @@ class SyncOverlayBoundary extends Component<
     const message =
       error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     logEvent(
-      `sync overlay error: ${this.props.appid} ${message.slice(0, 200)} at ${info.componentStack
+      `sync overlay error: ${this.props.appid} ${message.slice(0, ERROR_MESSAGE_PREVIEW)} at ${info.componentStack
         ?.split("\n")[1]
         ?.trim()
-        .slice(0, 120) ?? "unknown"}`
+        .slice(0, STACK_PREVIEW) ?? "unknown"}`
     );
   }
 

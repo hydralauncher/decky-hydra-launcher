@@ -89,6 +89,8 @@ function Plugin() {
 let updateInterval: NodeJS.Timeout;
 let lastTick: Date;
 
+const PLAYTIME_TICK_SECONDS = 10;
+
 const pendingStatusChecks = new Map<string, Promise<void>>();
 
 const sessionState = new Map<string, { status: "active" | "exited"; at: number }>();
@@ -260,7 +262,7 @@ const handleAppLifetimeNotification = async (
 
         setElapsedTimeInMillis(Date.now() - startedAt.getTime());
 
-        if (secondsSinceLastTick >= 10) {
+        if (secondsSinceLastTick >= PLAYTIME_TICK_SECONDS) {
           const isHydraRunning = await isHydraLauncherRunning();
 
           if (isHydraRunning) {
@@ -285,11 +287,6 @@ const handleAppLifetimeNotification = async (
       return;
     }
 
-    if (!cloudGame) {
-      logEvent(`auto-sync skipped: ineligible (${playGame.objectId})`);
-      return;
-    }
-
     if (playtimeOwner !== null && playtimeOwner !== playGame.objectId) {
       logEvent(`exit preserves active session (${playGame.objectId} keeps ${playtimeOwner})`);
     } else {
@@ -298,6 +295,11 @@ const handleAppLifetimeNotification = async (
       }
       clearGame();
       playtimeOwner = null;
+    }
+
+    if (!cloudGame) {
+      logEvent(`auto-sync skipped: ineligible (${playGame.objectId})`);
+      return;
     }
 
     const session = consumeSessionExit(cloudGame.objectId);
