@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use regex::Regex;
@@ -120,37 +120,6 @@ pub fn get_windows_like_user_profile_path(wine_prefix_path: &str) -> Result<Stri
     }
 }
 
-
-pub fn add_trailing_slash(path: &str) -> String {
-    if path.ends_with('/') || path.ends_with('\\') {
-        path.to_string()
-    } else {
-        format!("{}/", path)
-    }
-}
-
-pub fn transform_ludusavi_backup_path_into_windows_path(
-    backup_path: &str,
-    wine_prefix_path: Option<String>,
-) -> String {
-    let mut path = backup_path.to_string();
-
-    if let Some(prefix) = wine_prefix_path {
-        let normalized_prefix = add_trailing_slash(&prefix);
-        path = path.replace(&normalized_prefix, "");
-    }
-
-    path.replace("drive_c", "C:")
-}
-
-pub fn add_wine_prefix_to_windows_path(windows_path: &str, wine_prefix_path: Option<&str>) -> String {
-    if let Some(prefix) = wine_prefix_path {
-        let windows_path_adjusted = windows_path.replace("C:", "drive_c");
-        Path::new(prefix).join(windows_path_adjusted).to_string_lossy().to_string()
-    } else {
-        windows_path.to_string()
-    }
-}
 
 pub fn normalize_path(path: &str) -> String {
     let replaced = path.replace('\\', "/");
