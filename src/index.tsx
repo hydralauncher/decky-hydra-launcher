@@ -116,8 +116,13 @@ const consumeSessionExit = (objectId: string): "active" | "exited" | "unknown" =
 
 const lifetimeChains = new Map<string, Promise<void>>();
 
+let playtimeOwner: string | null = null;
+let notifySeq = 0;
+let latestLaunchSeq = 0;
+
 const handleAppLifetimeNotification = async (
-  notification: AppLifetimeNotification
+  notification: AppLifetimeNotification,
+  seq: number
 ) => {
   const {
     clearGame,
@@ -129,12 +134,6 @@ const handleAppLifetimeNotification = async (
   const { setLibrary } = useLibraryStore.getState();
   const { auth } = useAuthStore.getState();
   const { hasActiveSubscription } = useUserStore.getState();
-
-  if (updateInterval) {
-    clearInterval(updateInterval);
-  }
-
-  clearGame();
 
   const library = await getLibrary();
   setLibrary(library);
@@ -176,6 +175,15 @@ const handleAppLifetimeNotification = async (
   );
 
     if (notification.bRunning) {
+      if (seq !== latestLaunchSeq) {
+        logEvent(`launch superseded (${playGame.objectId})`);
+        return;
+      }
+      if (updateInterval) {
+        clearInterval(updateInterval);
+      }
+      clearGame();
+      playtimeOwner = playGame.objectId;
       const startedAt = new Date();
       lastTick = startedAt;
 
@@ -280,6 +288,16 @@ const handleAppLifetimeNotification = async (
     if (!cloudGame) {
       logEvent(`auto-sync skipped: ineligible (${playGame.objectId})`);
       return;
+    }
+
+    if (playtimeOwner !== null && playtimeOwner !== playGame.objectId) {
+      logEvent(`exit preserves active session (${playGame.objectId} keeps ${playtimeOwner})`);
+    } else {
+      if (updateInterval) {
+        clearInterval(updateInterval);
+      }
+      clearGame();
+      playtimeOwner = null;
     }
 
     const session = consumeSessionExit(cloudGame.objectId);
@@ -399,8 +417,10 @@ const onAppLifetimeNotification = (
   notification: AppLifetimeNotification
 ): Promise<void> => {
   const key = String(notification.unAppID);
+  const seq = ++notifySeq;
+  if (notification.bRunning) latestLaunchSeq = seq;
   const prior = lifetimeChains.get(key) ?? Promise.resolve();
-  const next = prior.then(() => handleAppLifetimeNotification(notification));
+  const next = prior.then(() => handleAppLifetimeNotification(notification, seq));
   const settled = next.catch(() => {});
   lifetimeChains.set(key, settled);
   return next.finally(() => {
