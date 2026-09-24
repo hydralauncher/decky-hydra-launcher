@@ -272,6 +272,14 @@ fn normalize_exe(path: &str) -> String {
 
 }
 
+const VDF_BYTE_WIDTH: usize = 1;
+
+const VDF_INT_WIDTH: usize = 4;
+
+const VDF_LONG_WIDTH: usize = 8;
+
+const VDF_WCHAR_WIDTH: usize = 2;
+
 #[derive(Debug)]
 
 enum VdfNode {
@@ -290,7 +298,7 @@ fn read_cstring(data: &[u8], pos: &mut usize) -> Option<String> {
 
     while *pos < data.len() && data[*pos] != 0 {
 
-        *pos += 1;
+        *pos += VDF_BYTE_WIDTH;
 
     }
 
@@ -302,7 +310,7 @@ fn read_cstring(data: &[u8], pos: &mut usize) -> Option<String> {
 
     let s = String::from_utf8_lossy(&data[start..*pos]).to_string();
 
-    *pos += 1;
+    *pos += VDF_BYTE_WIDTH;
 
     Some(s)
 
@@ -322,7 +330,7 @@ fn parse_vdf_dict(data: &[u8], pos: &mut usize) -> Option<Vec<(String, VdfNode)>
 
         let kind = data[*pos];
 
-        *pos += 1;
+        *pos += VDF_BYTE_WIDTH;
 
         if kind == 0x08 {
 
@@ -340,15 +348,15 @@ fn parse_vdf_dict(data: &[u8], pos: &mut usize) -> Option<Vec<(String, VdfNode)>
 
             0x02 => {
 
-                if *pos + 4 > data.len() {
+                if *pos + VDF_INT_WIDTH > data.len() {
 
                     return None;
 
                 }
 
-                let v = i32::from_le_bytes(data[*pos..*pos + 4].try_into().ok()?);
+                let v = i32::from_le_bytes(data[*pos..*pos + VDF_INT_WIDTH].try_into().ok()?);
 
-                *pos += 4;
+                *pos += VDF_INT_WIDTH;
 
                 VdfNode::Int(v)
 
@@ -356,13 +364,13 @@ fn parse_vdf_dict(data: &[u8], pos: &mut usize) -> Option<Vec<(String, VdfNode)>
 
             0x03 | 0x04 | 0x06 => {
 
-                if *pos + 4 > data.len() {
+                if *pos + VDF_INT_WIDTH > data.len() {
 
                     return None;
 
                 }
 
-                *pos += 4;
+                *pos += VDF_INT_WIDTH;
 
                 continue;
 
@@ -370,13 +378,13 @@ fn parse_vdf_dict(data: &[u8], pos: &mut usize) -> Option<Vec<(String, VdfNode)>
 
             0x07 => {
 
-                if *pos + 8 > data.len() {
+                if *pos + VDF_LONG_WIDTH > data.len() {
 
                     return None;
 
                 }
 
-                *pos += 8;
+                *pos += VDF_LONG_WIDTH;
 
                 continue;
 
@@ -384,13 +392,13 @@ fn parse_vdf_dict(data: &[u8], pos: &mut usize) -> Option<Vec<(String, VdfNode)>
 
             0x05 => {
 
-                while *pos + 1 < data.len() && !(data[*pos] == 0 && data[*pos + 1] == 0) {
+                while *pos + VDF_WCHAR_WIDTH - 1 < data.len() && !(data[*pos] == 0 && data[*pos + VDF_WCHAR_WIDTH - 1] == 0) {
 
-                    *pos += 2;
+                    *pos += VDF_WCHAR_WIDTH;
 
                 }
 
-                *pos = (*pos + 2).min(data.len());
+                *pos = (*pos + VDF_WCHAR_WIDTH).min(data.len());
 
                 continue;
 
@@ -759,58 +767,62 @@ pub fn library_game_keys() -> Option<HashSet<(String, String)>> {
 
     let mut out = HashSet::new();
 
-    if let Ok(mut iter) = snapshot.db.new_iter() {
+    let Ok(mut iter) = snapshot.db.new_iter() else {
 
-        while let Some((key_bytes, value_bytes)) = iter.next() {
+        let _ = snapshot.db.close();
 
-            let Ok(key) = String::from_utf8(key_bytes) else {
+        return None;
 
-                continue;
+    };
 
-            };
+    while let Some((key_bytes, value_bytes)) = iter.next() {
 
-            if !key.starts_with("!games") {
+        let Ok(key) = String::from_utf8(key_bytes) else {
 
-                continue;
+            continue;
 
-            }
+        };
 
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&value_bytes) else {
+        if !key.starts_with("!games") {
 
-                continue;
-
-            };
-
-            let (Some(object_id), shop) = (
-                value.get("objectId").and_then(|v| v.as_str()),
-                value
-                    .get("shop")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("steam"),
-            ) else {
-
-                continue;
-
-            };
-
-            let deleted = value
-                .get("isDeleted")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-                || value
-                    .get("is_deleted")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-            if deleted {
-
-                continue;
-
-            }
-
-            out.insert((shop.to_string(), object_id.to_string()));
+            continue;
 
         }
+
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&value_bytes) else {
+
+            continue;
+
+        };
+
+        let (Some(object_id), shop) = (
+            value.get("objectId").and_then(|v| v.as_str()),
+            value
+                .get("shop")
+                .and_then(|v| v.as_str())
+                .unwrap_or("steam"),
+        ) else {
+
+            continue;
+
+        };
+
+        let deleted = value
+            .get("isDeleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            || value
+                .get("is_deleted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+        if deleted {
+
+            continue;
+
+        }
+
+        out.insert((shop.to_string(), object_id.to_string()));
 
     }
 
@@ -1076,19 +1088,28 @@ pub struct AnchorRecord {
 
 }
 
+const UUID_SEGMENT_COUNT: usize = 5;
+
+const UUID_SEGMENT_LENS: [usize; UUID_SEGMENT_COUNT] = [8, 4, 4, 4, 12];
+
 pub(crate) fn valid_environment_marker(value: &str) -> bool {
 
     let marker = value.trim().to_lowercase();
 
     let parts: Vec<&str> = marker.split('-').collect();
 
-    if parts.len() != 5 {
+    if parts.len() != UUID_SEGMENT_COUNT {
         return false;
     }
 
     let [a, b, c, d, e] = [parts[0], parts[1], parts[2], parts[3], parts[4]];
 
-    if a.len() != 8 || b.len() != 4 || c.len() != 4 || d.len() != 4 || e.len() != 12 {
+    if a.len() != UUID_SEGMENT_LENS[0]
+        || b.len() != UUID_SEGMENT_LENS[1]
+        || c.len() != UUID_SEGMENT_LENS[2]
+        || d.len() != UUID_SEGMENT_LENS[3]
+        || e.len() != UUID_SEGMENT_LENS[4]
+    {
         return false;
     }
 
@@ -1123,16 +1144,22 @@ pub fn prefix_environment_id(prefix: Option<&str>) -> Option<String> {
 
 }
 
+const ANCHOR_KEY_LEGACY_ARITY: usize = 3;
+
+const ANCHOR_KEY_ENVIRONMENT_ARITY: usize = 5;
+
+const FILE_IDENTITY_TRIPLE_LEN: usize = 3;
+
 fn anchor_key_accepted(
     parts: &[serde_json::Value],
     environment_id: Option<&str>,
 ) -> bool {
 
-    if parts.len() == 3 {
+    if parts.len() == ANCHOR_KEY_LEGACY_ARITY {
         return true;
     }
 
-    if parts.len() == 5 && parts[3].as_str() == Some("environment") {
+    if parts.len() == ANCHOR_KEY_ENVIRONMENT_ARITY && parts[3].as_str() == Some("environment") {
 
         if let Some(key_env) = parts[4].as_str() {
 
@@ -1254,7 +1281,7 @@ pub fn list_sync_anchors(
 
         }
 
-        if parts.len() == 5 {
+        if parts.len() == ANCHOR_KEY_ENVIRONMENT_ARITY {
 
             let key_env = parts[4].as_str().unwrap_or_default();
 
@@ -1316,7 +1343,7 @@ pub fn list_sync_anchors(
 
                         let parts: Vec<String> = serde_json::from_value(id.clone()).ok()?;
 
-                        if parts.len() == 3 {
+                        if parts.len() == FILE_IDENTITY_TRIPLE_LEN {
 
                             Some(parts.join("\u{0}"))
 
@@ -1471,7 +1498,7 @@ pub fn build_sync_anchor_record(
         .iter()
         .filter_map(|id| {
             let parts: Vec<&str> = id.split('\u{0}').collect();
-            if parts.len() != 3 {
+            if parts.len() != FILE_IDENTITY_TRIPLE_LEN {
                 return None;
             }
             let key = anchor_file_key(parts[0], parts[1], parts[2]);
