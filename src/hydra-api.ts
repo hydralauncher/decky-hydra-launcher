@@ -17,9 +17,9 @@ const refreshToken: BeforeRequestHook = async (request) => {
     if (tokenExpirationTimestamp) {
       if (
         Number(tokenExpirationTimestamp) <
-        Date.now() - ACCESS_TOKEN_EXPIRATION_OFFSET_IN_MS
+        Date.now() + ACCESS_TOKEN_EXPIRATION_OFFSET_IN_MS
       ) {
-        const { expiresIn, accessToken } = await ky
+        const { expiresIn, accessToken, refreshToken: rotatedRefreshToken } = await ky
           .post(`${API_URL}/auth/refresh`, {
             headers: {
               "User-Agent": "Hydra-Decky-Plugin",
@@ -31,12 +31,13 @@ const refreshToken: BeforeRequestHook = async (request) => {
           .json<{
             expiresIn: number;
             accessToken: string;
-            refreshToken: string;
+            refreshToken?: string;
           }>();
 
         setAuth({
           ...auth,
           accessToken,
+          refreshToken: rotatedRefreshToken ?? refreshToken,
           tokenExpirationTimestamp:
             calculateTokenExpirationTimestamp(expiresIn),
         });

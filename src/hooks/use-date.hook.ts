@@ -40,6 +40,13 @@ export const formatDate = (
 };
 
 export function useDate() {
+  const systemLanguage = () => {
+    try {
+      return navigator.language || "en";
+    } catch {
+      return "en";
+    }
+  };
   return {
     formatDistance: (
       date: string | number | Date,
@@ -49,7 +56,7 @@ export function useDate() {
       try {
         return formatDistance(date, baseDate, {
           ...options,
-          locale: getDateLocale("en"),
+          locale: getDateLocale(systemLanguage()),
         });
       } catch (err) {
         console.error(err);
@@ -65,7 +72,7 @@ export function useDate() {
       try {
         return formatDistance(subMilliseconds(new Date(), millis), baseDate, {
           ...options,
-          locale: getDateLocale("en"),
+          locale: getDateLocale(systemLanguage()),
         });
       } catch (err) {
         console.error(err);
@@ -76,7 +83,7 @@ export function useDate() {
     formatDateTime: (date: number | Date | string): string => {
       try {
         return format(date, "MM-dd-yyyy - hh:mm a", {
-          locale: getDateLocale("en"),
+          locale: getDateLocale(systemLanguage()),
         });
       } catch (err) {
         console.error(err);
@@ -84,6 +91,6 @@ export function useDate() {
       }
     },
 
-    formatDate: (date: number | Date | string) => formatDate(date, "en"),
+    formatDate: (date: number | Date | string) => formatDate(date, systemLanguage()),
   };
 }
