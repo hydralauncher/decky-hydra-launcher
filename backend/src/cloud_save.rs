@@ -618,7 +618,7 @@ fn prefix_key(wine_prefix: Option<&str>) -> String {
 
 }
 
-fn valid_state_segment(value: &str) -> bool {
+pub(crate) fn valid_state_segment(value: &str) -> bool {
 
     !value.is_empty()
 

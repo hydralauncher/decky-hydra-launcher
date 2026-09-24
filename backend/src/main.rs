@@ -8,6 +8,8 @@ mod hydra;
 
 mod merge;
 
+mod prune;
+
 mod rules;
 
 mod scanner;
@@ -69,6 +71,21 @@ async fn main() {
             let library = get_library();
 
             println!("{}", library);
+
+        }
+
+        "prune-cloud-save-cache" => {
+
+            let report = crate::prune::prune_cloud_save_cache();
+
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "pruned": report.pruned,
+                    "skipped": report.skipped,
+                })
+            );
 
         }
 

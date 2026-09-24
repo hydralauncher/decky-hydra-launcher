@@ -104,6 +104,10 @@ class Plugin:
     async def get_library(self):
         return json.loads(await _run_backend(["get-library"]))
 
+    async def prune_cloud_save_cache(self):
+        result = await _run_backend(["prune-cloud-save-cache"])
+        return json.loads(result)
+
     async def export_game_artifact(self, download_url: str, filename: str):
         result = await _run_backend(["export-game-artifact", download_url, filename])
         return json.loads(result)

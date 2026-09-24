@@ -12,7 +12,7 @@ use std::io::Write;
 
 use reqwest::Client;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 struct Snapshot {
 
@@ -746,6 +746,77 @@ fn game_identities() -> Vec<GameIdentity> {
     let _ = snapshot.db.close();
 
     out
+
+}
+
+pub fn library_game_keys() -> Option<HashSet<(String, String)>> {
+
+    let Some(mut snapshot) = get_leveldb_snapshot() else {
+
+        return None;
+
+    };
+
+    let mut out = HashSet::new();
+
+    if let Ok(mut iter) = snapshot.db.new_iter() {
+
+        while let Some((key_bytes, value_bytes)) = iter.next() {
+
+            let Ok(key) = String::from_utf8(key_bytes) else {
+
+                continue;
+
+            };
+
+            if !key.starts_with("!games") {
+
+                continue;
+
+            }
+
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&value_bytes) else {
+
+                continue;
+
+            };
+
+            let (Some(object_id), shop) = (
+                value.get("objectId").and_then(|v| v.as_str()),
+                value
+                    .get("shop")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("steam"),
+            ) else {
+
+                continue;
+
+            };
+
+            let deleted = value
+                .get("isDeleted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || value
+                    .get("is_deleted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+            if deleted {
+
+                continue;
+
+            }
+
+            out.insert((shop.to_string(), object_id.to_string()));
+
+        }
+
+    }
+
+    let _ = snapshot.db.close();
+
+    Some(out)
 
 }
 

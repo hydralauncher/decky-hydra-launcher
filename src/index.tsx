@@ -24,6 +24,7 @@ import {
   getLibrary,
   isHydraLauncherRunning,
   logEvent,
+  pruneCloudSaveCache,
   syncCloudSave,
 } from "./events";
 import {
@@ -470,7 +471,7 @@ export default definePlugin(() => {
         }
         const guard = useCloudSaveGuard.getState();
         for (const id of [...guard.remoteNewerGames]) {
-          if (!library.some((game) => game.objectId === id)) {
+          if (!library.some((game) => game.objectId === id && !game.isDeleted)) {
             guard.clearRemoteNewer(id);
             logEvent(`guard prune: deleted (${id})`);
           }
@@ -479,6 +480,15 @@ export default definePlugin(() => {
           (game) => game.steamShortcutAppId != null
         ).length;
         logEvent(`library shortcut ids: ${withIds}/${library.length} games`);
+        pruneCloudSaveCache().then(
+          (report) => {
+            if (report.skipped) return;
+            if (report.pruned > 0) {
+              logEvent(`cache prune: removed ${report.pruned} orphans`);
+            }
+          },
+          () => {}
+        );
       });
 
       WSClient.connect();

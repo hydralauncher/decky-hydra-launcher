@@ -10,6 +10,10 @@ import type {
 
 export const getAuth = callable<[], Auth>("get_auth");
 export const getLibrary = callable<[], Game[]>("get_library");
+export const pruneCloudSaveCache = callable<
+  [],
+  { pruned: number; skipped: boolean }
+>("prune_cloud_save_cache");
 export const isHydraLauncherRunning = callable<[], boolean>(
   "is_hydra_launcher_running"
 );

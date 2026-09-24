@@ -450,7 +450,7 @@ struct SidecarRules {
 
 }
 
-fn plugin_data_dir() -> Result<PathBuf> {
+pub(crate) fn plugin_data_dir() -> Result<PathBuf> {
 
     Ok(dirs::home_dir()
 
@@ -462,7 +462,7 @@ fn plugin_data_dir() -> Result<PathBuf> {
 
 }
 
-fn sidecar_path(dir: &Path, object_id: &str) -> Option<PathBuf> {
+pub(crate) fn sidecar_path(dir: &Path, object_id: &str) -> Option<PathBuf> {
     if object_id.is_empty()
         || !object_id
             .chars()
