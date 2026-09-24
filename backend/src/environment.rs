@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn identity_json_shape_matches_launcher() {
         let identity = EnvironmentIdentity {
-            version: 2,
+            version: ANCHOR_IDENTITY_VERSION,
             platform: "linux",
             home_dir: "/home/deck".to_string(),
             documents_dir: Some("/home/deck/Documents".to_string()),
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn environment_id_matches_node_sha256() {
         let identity = EnvironmentIdentity {
-            version: 2,
+            version: ANCHOR_IDENTITY_VERSION,
             platform: "linux",
             home_dir: "/home/deck".to_string(),
             documents_dir: Some("/home/deck/Documents".to_string()),
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn identity_nulls_match_launcher() {        let identity = EnvironmentIdentity {
-            version: 2,
+            version: ANCHOR_IDENTITY_VERSION,
             platform: "linux",
             home_dir: "/home/deck".to_string(),
             documents_dir: None,

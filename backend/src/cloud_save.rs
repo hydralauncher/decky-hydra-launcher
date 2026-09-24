@@ -104,6 +104,8 @@ const STATUS_MISMATCH_SAMPLE_IDS: usize = 2;
 
 const MAX_SYNC_ATTEMPTS: u32 = 2;
 
+const FIRST_SYNC_ATTEMPT: u32 = 0;
+
 pub const REMOTE_NEWER_CODE: &str = "remote-newer";
 
 pub const VARIANT_ID_VERSION: u32 = 1;
@@ -1419,7 +1421,7 @@ pub async fn sync_cloud_save(
 
                     .any(|cause| cause.to_string().contains("changed during sync"));
 
-                if attempt == 0 && retryable {
+                if attempt == FIRST_SYNC_ATTEMPT && retryable {
 
                     last_error = Some(err);
 
@@ -2166,7 +2168,7 @@ pub async fn sync_cloud_save(
 
                 });
 
-                if attempt == 0 && retryable {
+                if attempt == FIRST_SYNC_ATTEMPT && retryable {
 
                     let msg = format!("{err:#}");
 
@@ -2666,7 +2668,7 @@ async fn prepare_upload_commit(
 
             Err(err) => {
 
-                if attempt == 0 && (err.is_connect() || err.is_timeout() || err.is_request()) {
+                if attempt == FIRST_SYNC_ATTEMPT && (err.is_connect() || err.is_timeout() || err.is_request()) {
 
                     continue;
 
