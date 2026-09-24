@@ -106,6 +106,8 @@ const MAX_SYNC_ATTEMPTS: u32 = 2;
 
 const FIRST_SYNC_ATTEMPT: u32 = 0;
 
+const SHA256_HEX_LEN: usize = 64;
+
 pub const REMOTE_NEWER_CODE: &str = "remote-newer";
 
 pub const VARIANT_ID_VERSION: u32 = 1;
@@ -935,7 +937,7 @@ struct DownloadUrlFile {
 
 fn is_valid_hash(value: &str) -> bool {
 
-    value.len() == 64
+    value.len() == SHA256_HEX_LEN
 
         && value
 
